@@ -15,6 +15,7 @@ matrix:
 
 install:
   - if [ $TRAVIS_OS_NAME = linux ]; then sudo apt-get install liblz4-1; else brew install lz4; fi
+  - if [ $TRAVIS_OS_NAME = linux ]; then objdump -T /usr/lib/x86_64-linux-gnu/liblz4.so.1; fi
 
 script: 
   - dotnet --info
