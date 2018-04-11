@@ -14,7 +14,7 @@ matrix:
       sudo: false
 
 install:
-  - if [ $TRAVIS_OS_NAME = linux ]; then sudo apt-get install liblz4-1; else brew install lz4; fi
+  - if [ $TRAVIS_OS_NAME = linux ]; then wget http://http.us.debian.org/debian/pool/main/l/lz4/liblz4-1_0.0~r131-2+b1_amd64.deb; sudo dpkg -i liblz4-1_0.0~r131-2+b1_amd64.deb; else brew install lz4; fi
   - if [ $TRAVIS_OS_NAME = linux ]; then objdump -T /usr/lib/x86_64-linux-gnu/liblz4.so.1; fi
 
 script: 
