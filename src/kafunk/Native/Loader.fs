@@ -37,7 +37,7 @@ module Loader =
         let path = resolveLibPath name
         let ptr = dlopen(path, RTLD_NOW)
         if ptr = IntPtr.Zero then
-            failwith (sprintf "Failed to load dynamic library '%s'" name)
+            failwith (sprintf "Failed to load dynamic library '%s'" path)
 
     let load name = lazy(
         match (Environment.Is64BitProcess, Environment.OSVersion.Platform) with
