@@ -25,6 +25,7 @@
     <Reference Include="System.ServiceModel" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="lib\linux64-libc6\liblz4.so.1" />
     <None Include="lib\win32\liblz4.so.1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
