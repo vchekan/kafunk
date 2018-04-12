@@ -16,23 +16,26 @@ module Loader =
     [<DllImport("libdl")>]
     extern IntPtr private dlopen(string _fileName, int _flags)
 
-    /// Load assembly relative to executing assembly's CodeBase plus "lib\win64" and "lib\win32" folders.
+    /// Load assembly relative to executing assembly's CodeBase.
     /// This function will not work for multi-assembly configuration, but is ok for kafunk for now.
     /// More elaborative loading strategies can be found here:
     /// https://github.com/mellinoe/nativelibraryloader
+    let resolveLibPath name =
+        System.Reflection.Assembly.GetExecutingAssembly().CodeBase
+        |> fun path -> (new Uri(path)).LocalPath
+        |> Path.GetDirectoryName
+        |> fun path -> Path.Combine(path, name)
+
     let private loadWin name =
-        let ptr = 
-                System.Reflection.Assembly.GetExecutingAssembly().CodeBase
-                |> fun path -> (new Uri(path)).LocalPath
-                |> Path.GetDirectoryName
-                |> fun path -> Path.Combine(path, name)
+        let ptr = resolveLibPath name
                 |> LoadLibrary
 
         if ptr = IntPtr.Zero then
             failwithf "Failed to load native dll '%s'" name
 
     let private loadUnix name: unit =
-        let ptr = dlopen(name, RTLD_NOW)
+        let path = resolveLibPath name
+        let ptr = dlopen(path, RTLD_NOW)
         if ptr = IntPtr.Zero then
             failwith (sprintf "Failed to load dynamic library '%s'" name)
 
