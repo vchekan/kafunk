@@ -43,7 +43,13 @@ module Loader =
         match (Environment.Is64BitProcess, Environment.OSVersion.Platform) with
             | (true, PlatformID.Win32NT) -> loadWin (sprintf "lib\\win64\\%s" name)
             | (false, PlatformID.Win32NT) -> loadWin (sprintf "lib\\win32\\%s" name)
-            | (true, PlatformID.Unix) -> loadUnix (sprintf "lib/linux64-libc6/%s" name)
+            | (true, PlatformID.Unix) -> 
+                // This is dumb: in order to be bug-compatible with Mono, dotnetcore considers OSX a Unix platform and PlatformID.MacOSX is just ignored :[
+                // https://github.com/dotnet/corefx/issues/19694
+                if RuntimeInformation.IsOSPlatform(OSPlatform.OSX) then
+                    loadUnix (sprintf "lib/OSX-10.12/%s" name)
+                else
+                    loadUnix (sprintf "lib/linux64-libc6/%s" name)
             | _ -> failwithf "Unsupported platform for LZ4 compression: %O, 64 bits: %O" Environment.OSVersion.Platform Environment.Is64BitProcess
     )
 
