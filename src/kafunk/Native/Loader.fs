@@ -37,7 +37,10 @@ module Loader =
         let path = resolveLibPath name
         let ptr = dlopen(path, RTLD_NOW)
         if ptr = IntPtr.Zero then
-            failwith (sprintf "Failed to load dynamic library '%s'" path)
+            failwith (sprintf "Failed to load dynamic library '%s'. IsOSPlatform: %b OSVersion.VersionString: %s" path 
+                        (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+                        (Environment.OSVersion.VersionString)
+                        )
 
     let load name = lazy(
         match (Environment.Is64BitProcess, Environment.OSVersion.Platform) with
@@ -49,6 +52,7 @@ module Loader =
                 // https://github.com/dotnet/corefx/issues/19694
                 // On top of this, RuntimeInformation is supported in NET471+ and not NET45 which we target
                 #if NET45
+                OperatingSystem.
                 loadUnix (sprintf "lib/linux64-libc6/%s" name)
                 #else
                 if RuntimeInformation.IsOSPlatform(OSPlatform.OSX) then
