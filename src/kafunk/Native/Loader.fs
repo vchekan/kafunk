@@ -37,8 +37,12 @@ module Loader =
         let path = resolveLibPath name
         let ptr = dlopen(path, RTLD_NOW)
         if ptr = IntPtr.Zero then
-            failwith (sprintf "Failed to load dynamic library '%s'. IsOSPlatform: %b OSVersion.VersionString: %s" path 
-                        (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            failwith (sprintf "Failed to load dynamic library '%s'. IsOSPlatform: %s OSVersion.VersionString: %s" path 
+                        #if NET45
+                        "NET45"
+                        #else
+                        (if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX)) then "true" else "false")
+                        #endif
                         (Environment.OSVersion.VersionString)
                         )
 
