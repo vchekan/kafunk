@@ -52,7 +52,6 @@ module Loader =
                 // https://github.com/dotnet/corefx/issues/19694
                 // On top of this, RuntimeInformation is supported in NET471+ and not NET45 which we target
                 #if NET45
-                OperatingSystem.
                 loadUnix (sprintf "lib/linux64-libc6/%s" name)
                 #else
                 if RuntimeInformation.IsOSPlatform(OSPlatform.OSX) then
