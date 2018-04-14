@@ -20,7 +20,7 @@ module Loader =
     /// This function will not work for multi-assembly configuration, but is ok for kafunk for now.
     /// More elaborative loading strategies can be found here:
     /// https://github.com/mellinoe/nativelibraryloader
-    let resolveLibPath name =
+    let private resolveLibPath name =
         System.Reflection.Assembly.GetExecutingAssembly().CodeBase
         |> fun path -> (new Uri(path)).LocalPath
         |> Path.GetDirectoryName
@@ -36,15 +36,17 @@ module Loader =
     let private loadUnix name: unit =
         let path = resolveLibPath name
         let ptr = dlopen(path, RTLD_NOW)
-        if ptr = IntPtr.Zero then
-            failwith (sprintf "Failed to load dynamic library '%s'. IsOSPlatform: %s OSVersion.VersionString: %s" path 
-                        #if NET45
-                        "NET45"
-                        #else
-                        (if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX)) then "true" else "false")
-                        #endif
-                        (Environment.OSVersion.VersionString)
-                        )
+        //if ptr = IntPtr.Zero then
+
+        failwith (sprintf "Failed to load dynamic library '%s'. IsOSPlatform: %s OSVersion.VersionString: %s ptr: %d" path 
+                    #if NET45
+                    "NET45"
+                    #else
+                    (if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX)) then "true" else "false")
+                    #endif
+                    (Environment.OSVersion.VersionString)
+                    ptr
+                    )
 
     let load name = lazy(
         match (Environment.Is64BitProcess, Environment.OSVersion.Platform) with
