@@ -44,12 +44,17 @@ module Loader =
             | (true, PlatformID.Win32NT) -> loadWin (sprintf "lib\\win64\\%s" name)
             | (false, PlatformID.Win32NT) -> loadWin (sprintf "lib\\win32\\%s" name)
             | (true, PlatformID.Unix) -> 
-                // This is dumb: in order to be bug-compatible with Mono, dotnetcore considers OSX a Unix platform and PlatformID.MacOSX is just ignored :[
+                // This is dumb: in order to be bug-compatible with Mono, dotnetcore considers OSX a Unix 
+                // platform and PlatformID.MacOSX is just ignored :[
                 // https://github.com/dotnet/corefx/issues/19694
+                // On top of this, RuntimeInformation is upported in NET471+ and not NET45 which we target
+                #if NET45
+                #else
                 if RuntimeInformation.IsOSPlatform(OSPlatform.OSX) then
                     loadUnix (sprintf "lib/OSX-10.12/%s" name)
                 else
                     loadUnix (sprintf "lib/linux64-libc6/%s" name)
+                #endif
             | _ -> failwithf "Unsupported platform for LZ4 compression: %O, 64 bits: %O" Environment.OSVersion.Platform Environment.Is64BitProcess
     )
 
