@@ -47,7 +47,7 @@ module Loader =
                 // This is dumb: in order to be bug-compatible with Mono, dotnetcore considers OSX a Unix 
                 // platform and PlatformID.MacOSX is just ignored :[
                 // https://github.com/dotnet/corefx/issues/19694
-                // On top of this, RuntimeInformation is upported in NET471+ and not NET45 which we target
+                // On top of this, RuntimeInformation is supported in NET471+ and not NET45 which we target
                 #if NET45
                 loadUnix (sprintf "lib/linux64-libc6/%s" name)
                 #else

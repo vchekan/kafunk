@@ -1,12 +1,13 @@
-﻿// See src/kafunk/Native/Loaders.fs for reasons why lz4 is not available on OSX when NET45 is target framework
-#if NET45   
-#else
-namespace Kafunk.Tests
+﻿namespace Kafunk.Tests
 
 open NUnit.Framework
 open Kafunk.Native
 open System
 open System.Text
+
+// See src/kafunk/Native/Loaders.fs for reasons why lz4 is not available on OSX when NET45 is target framework
+#if NET45   
+#else
 
 module LZ4 =
     open System.Numerics
