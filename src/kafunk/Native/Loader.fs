@@ -36,6 +36,7 @@ module Loader =
     let private loadUnix name: unit =
         let path = resolveLibPath name
         let ptr = dlopen(path, RTLD_NOW)
+        do System.Diagnostics.Debug.WriteLine("loadUnix {0} {1}", path, ptr)
         if ptr = IntPtr.Zero then
             failwith (sprintf "Failed to load dynamic library '%s'. IsOSPlatform: %s OSVersion.VersionString: %s" path 
                         #if NET45
