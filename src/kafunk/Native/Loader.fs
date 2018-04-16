@@ -27,13 +27,14 @@ module Loader =
         |> fun path -> Path.Combine(path, name)
 
     let private loadWin name =
-        let ptr = resolveLibPath name
-                |> LoadLibrary
+        let path = resolveLibPath name 
+        let ptr = LoadLibrary path
 
         if ptr = IntPtr.Zero then
             failwithf "Failed to load native dll '%s'" name
+        (path, ptr)
 
-    let private loadUnix name: unit =
+    let private loadUnix name =
         let path = resolveLibPath name
         let ptr = dlopen(path, RTLD_NOW)
         do System.Diagnostics.Debug.WriteLine("loadUnix {0} {1}", path, ptr)
@@ -46,6 +47,7 @@ module Loader =
                         #endif
                         (Environment.OSVersion.VersionString)
             )
+        (path, ptr)        
 
     let load name = lazy(
         match (Environment.Is64BitProcess, Environment.OSVersion.Platform) with
