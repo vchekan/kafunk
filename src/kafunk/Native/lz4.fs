@@ -83,7 +83,7 @@ module Lz4Framing =
     open FSharp.NativeInterop
     open native
 
-    let private ensureNativeIsLoaded = Loader.load "liblz4.1.dylib"
+    let private ensureNativeIsLoaded = Loader.load "liblz4.1"
 
     //
     // liblz4 error reporting
