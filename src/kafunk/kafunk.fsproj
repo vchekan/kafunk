@@ -28,7 +28,7 @@
     <None Include="lib\linux64-libc6\liblz4.so.1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Include="lib\OSX-10.12\liblz4.so.1">
+    <None Include="lib\OSX-10.12\liblz4.so.1.dylib">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Include="lib\win32\liblz4.so.1">
