@@ -62,10 +62,10 @@ module Loader =
                 loadUnix (sprintf "lib/linux64-libc6/%s" name)
                 #else
                 if RuntimeInformation.IsOSPlatform(OSPlatform.OSX) then
-                    //loadUnix (sprintf "lib/OSX-10.12/%s" name)
+                    //loadUnix (sprintf "lib/OSX-10.12/%s.so" name)
                     ("--", IntPtr.Zero)
                 else
-                    loadUnix (sprintf "lib/linux64-libc6/%s" name)
+                    loadUnix (sprintf "lib/linux64-libc6/%s.so" name)
                 #endif
             | _ -> failwithf "Unsupported platform for LZ4 compression: %O, 64 bits: %O" Environment.OSVersion.Platform Environment.Is64BitProcess
     )
