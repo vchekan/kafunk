@@ -62,7 +62,8 @@ module Loader =
                 loadUnix (sprintf "lib/linux64-libc6/%s" name)
                 #else
                 if RuntimeInformation.IsOSPlatform(OSPlatform.OSX) then
-                    loadUnix (sprintf "lib/OSX-10.12/%s" name)
+                    //loadUnix (sprintf "lib/OSX-10.12/%s" name)
+                    ("--", IntPtr.Zero)
                 else
                     loadUnix (sprintf "lib/linux64-libc6/%s" name)
                 #endif
