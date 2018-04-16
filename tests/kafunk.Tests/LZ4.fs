@@ -13,24 +13,6 @@ module LZ4 =
     open System.Numerics
 
     [<Test>]
-    let ``Dll is loaded`` () =
-        let res = Lz4Framing.debugDllLoad
-        failwithf "Loaded lib: %s" (fst res)
-        Assert.IsTrue(System.IO.File.Exists(fst res))
-        Assert.AreNotEqual(IntPtr.Zero, snd res)
-
-    [<Test>]
-    let ``debug dll path`` () =
-        let res = Lz4Framing.debugDllLoad
-        Assert.AreEqual("--", fst res)
-
-    [<Test>]
-    let ``debug dll handler`` () =
-        let res = Lz4Framing.debugDllLoad
-        Assert.AreEqual(IntPtr.Zero, snd res)
-
-
-    [<Test>]
     let ``compress produce result smaller than original`` () =
         let text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit
             . Sed malesuada consectetur augue, vitae euismod dui imperdiet in. Nunc arcu felis, 
