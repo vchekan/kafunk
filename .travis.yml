@@ -14,7 +14,7 @@ matrix:
       sudo: false
 
 before_install:
-  - if [ $TRAVIS_OS_NAME = linux ]; then brew install lz4; fi
+  - if [ $TRAVIS_OS_NAME = osx ]; then brew install lz4; fi
 
 script: 
   - dotnet --info
