@@ -15,6 +15,7 @@ module LZ4 =
     [<Test>]
     let ``Dll is loaded`` () =
         let res = Lz4Framing.debugDllLoad
+        failwithf "Loaded lib: %s" (fst res)
         Assert.IsTrue(System.IO.File.Exists(fst res))
         Assert.AreNotEqual(IntPtr.Zero, snd res)
 
