@@ -25,16 +25,16 @@
     <Reference Include="System.ServiceModel" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="lib\linux64-libc6\liblz4.1">
+    <None Include="liblz4.1.so">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Include="lib\OSX-10.12\liblz4.1">
+    <None Include="liblz4.1.dylib">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Include="lib\win32\liblz4.1">
+    <None Include="x86\liblz4.1.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Include="lib\win64\liblz4.1">
+    <None Include="x64\liblz4.1.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Include="paket.references" />
@@ -68,6 +68,10 @@
     <Compile Include="Offsets.fs" />
     <Compile Include="Consumer.fs" />
     <Compile Include="ConsumerInfo.fs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="lib\linux64-libc6\" />
+    <Folder Include="lib\OSX-10.12\" />
   </ItemGroup>
   <Import Project="..\..\.paket\Paket.Restore.targets" />
 </Project>
