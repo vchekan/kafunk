@@ -1,6 +1,6 @@
 ﻿namespace Kafunk.Native
 
-//open System.Runtime.Loader
+/// Windlows pre-load dll from x86/x64 folder depending on Environment.Is64BitProcess
 module Loader = 
     open System
     open System.Runtime.InteropServices
@@ -34,40 +34,11 @@ module Loader =
         if ptr = IntPtr.Zero then
             failwithf "Failed to load native dll '%s'" name
 
-    let private loadUnix name =
-        let path = resolveLibPath name
-        let ptr = dlopen(path, RTLD_NOW)
-        if ptr = IntPtr.Zero then
-            failwith (sprintf "Failed to load dynamic library '%s'. IsOSPlatform: %s OSVersion.VersionString: %s" path 
-#if NET45
-                        "NET45"
-#else
-                        (if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX)) then "true" else "false")
-#endif
-                        (Environment.OSVersion.VersionString)
-            )
-        (path, ptr)        
-
     let load name = lazy(
         match (Environment.Is64BitProcess, Environment.OSVersion.Platform) with
             | (true, PlatformID.Win32NT) -> loadWin (sprintf "x64\\%s.dll" name)
             | (false, PlatformID.Win32NT) -> loadWin (sprintf "x86\\%s.dll" name)
-            (*| (true, PlatformID.Unix) -> 
-                // This is dumb: in order to be bug-compatible with Mono, dotnetcore considers OSX a Unix 
-                // platform and PlatformID.MacOSX is just ignored :[
-                // https://github.com/dotnet/corefx/issues/19694
-                // On top of this, RuntimeInformation is supported in NET471+ and not NET45 which we target
-                #if NET45
-                loadUnix (sprintf "lib/linux64-libc6/%s" name)
-                #else
-                if RuntimeInformation.IsOSPlatform(OSPlatform.OSX) then
-                    //loadUnix (sprintf "lib/OSX-10.12/%s" name)
-                    ("--", IntPtr.Zero)
-                else
-                    loadUnix (sprintf "lib/linux64-libc6/%s" name)
-                #endif
-                *)
-            | _ -> () //failwithf "Unsupported platform for LZ4 compression: %O, 64 bits: %O" Environment.OSVersion.Platform Environment.Is64BitProcess
+            | _ -> ()
     )
 
 
