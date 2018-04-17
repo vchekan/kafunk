@@ -69,9 +69,5 @@
     <Compile Include="Consumer.fs" />
     <Compile Include="ConsumerInfo.fs" />
   </ItemGroup>
-  <ItemGroup>
-    <Folder Include="lib\linux64-libc6\" />
-    <Folder Include="lib\OSX-10.12\" />
-  </ItemGroup>
   <Import Project="..\..\.paket\Paket.Restore.targets" />
 </Project>
