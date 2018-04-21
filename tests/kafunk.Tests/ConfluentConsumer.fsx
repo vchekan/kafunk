@@ -1,5 +1,6 @@
 ﻿#r "bin/release/net45/confluent.kafka.dll"
 #load "Refs.fsx"
+#load "Confluent.Kafka.fs"
 #time "on"
 
 open System
@@ -12,12 +13,6 @@ open Refs
 open Confluent.Kafka
 open Confluent.Kafka.Serialization
 open FSharp.Control
-
-let dict (xs:seq<'a * 'b>) =
-  let d = new Dictionary<_, _>()
-  for (k,v) in xs do
-    d.Add (k,v)
-  d
 
 let Log = Log.create __SOURCE_FILE__
 
@@ -66,11 +61,15 @@ let go = async {
   //consumer.Assign([ TopicPartition(topic, 0) ])
   consumer.Subscribe (topic)
 
-  let md = consumer.GetMetadata(true)
-  Log.info "metadata|%A" md.Topics
+  //let md = consumer.GetMetadata(true)
+  //Log.info "metadata|%A" md.Topics
 
   let handle (m:Message) = async {
     Log.info "handing message|p=%i key=%s" m.Partition (Encoding.UTF8.GetString m.Key)
+    return () }
+
+  let handleBatch (ms:Message[]) = async {
+    Log.info "handling_batch|size=%i" ms.Length
     return () }
 
   use counter = Metrics.counter Log 5000
@@ -79,12 +78,22 @@ let go = async {
     handle
     |> Metrics.throughputAsyncTo counter (fun _ -> 1)
 
-  while true do
-    let mutable m = Unchecked.defaultof<_>
-    if consumer.Consume(&m, 1000) then
-      do! handle m      
-    else
-      Log.info "skipped"
+  let handleBatch = 
+    handleBatch
+    |> Metrics.throughputAsyncTo counter (fun (ms,_) -> ms.Length)
+
+  //do!
+  //  Consumer.streamBuffered consumer 1000 1000
+  //  |> AsyncSeq.iterAsync handleBatch
+
+  do! Consumer.consume consumer 1000 1000 (snd >> handleBatch)
+
+  //while true do
+  //  let mutable m = Unchecked.defaultof<_>
+  //  if consumer.Consume(&m, 1000) then
+  //    do! handle m      
+  //  else
+  //    Log.info "skipped"
 
   //let! _ = Async.StartChild (async {
   //  while true do

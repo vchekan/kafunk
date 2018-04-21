@@ -5,6 +5,7 @@
   </PropertyGroup>
   <ItemGroup>
     <None Include="paket.references" />
+    <Compile Include="Confluent.Kafka.fs" />
     <Compile Include="Prelude.fs" />
     <Compile Include="Async.fs" />
     <Compile Include="Shared.fs" />

@@ -1,5 +1,6 @@
 ﻿#r "bin/release/net45/confluent.kafka.dll"
 #load "Refs.fsx"
+#load "Confluent.Kafka.fs"
 #time "on"
 
 open System
@@ -17,7 +18,6 @@ let toDict (xs:seq<'a * 'b>) =
   for (k,v) in xs do
     d.Add (k,v)
   d
-
 
 let Log = Log.create __SOURCE_FILE__
 
@@ -73,15 +73,14 @@ let go = async {
 
   let! _ = Async.StartChild monitor
 
-  //use producer = new Producer<Null, string>(config, null, new StringSerializer(Encoding.UTF8))
-  use producer = new Producer<string, string>(config, new StringSerializer(Encoding.UTF8), new StringSerializer(Encoding.UTF8))
+  use producer = new Producer(config)
 
   producer.OnLog |> Event.add (fun e ->
     Log.info "librdkafka|name=%s facility=%s message=%s" e.Name e.Facility e.Message
   )
 
   let produce (m:string) = async {
-    let! res = producer.ProduceAsync(topic, "k", m, true) |> Async.awaitTaskCancellationAsError
+    let! res = Producer.produceString producer topic ("",m)
     return res }
 
   let produce = 
