@@ -25,11 +25,13 @@ Log.info "running_consumer|host=%s topic=%s group=%s" host topic group
 let config =
   [       
     "bootstrap.servers", box host 
+    //"debug", box "broker,cgrp,topic,fetch"
+    //"debug", box "broker,cgrp,topic"
     //"linger.ms", box 100
     "group.id", box group
     //"max.in.flight.requests.per.connection", box 1
     "default.topic.config", box <| (dict ["auto.offset.reset", box "earliest"])
-    "enable.auto.commit", box false
+    "enable.auto.commit", box true
     "fetch.message.max.bytes", box 10000
 
   ] |> dict
@@ -39,7 +41,7 @@ let go = async {
   let consumer = new Consumer (config)
   
   consumer.OnLog 
-  |> Event.add (fun m -> Log.info "log|%O" m)
+  |> Event.add (fun m -> Log.info "log|leve=%i name=%s facility=%s m=%s" m.Level m.Name m.Facility m.Message)
   
   consumer.OnError 
   |> Event.add (fun m -> Log.info "error|%O" m)
@@ -57,19 +59,28 @@ let go = async {
 
   consumer.OnPartitionEOF 
   |> Event.add (fun m -> Log.info "eof|%O" m.Partition)
+
+  consumer.OnOffsetsCommitted 
+  |> Event.add (fun m -> 
+    Log.info "committed_offsets|error=%O offsets=%s" 
+      m.Error (m.Offsets |> Seq.map (fun o -> sprintf "[p=%i o=%i e=%O]" o.Partition o.Offset.Value o.Error) |> String.concat ";"))
  
   //consumer.Assign([ TopicPartition(topic, 0) ])
   consumer.Subscribe (topic)
+
 
   //let md = consumer.GetMetadata(true)
   //Log.info "metadata|%A" md.Topics
 
   let handle (m:Message) = async {
-    Log.info "handing message|p=%i key=%s" m.Partition (Encoding.UTF8.GetString m.Key)
+    //Log.info "handing message|p=%i key=%s" m.Partition (Encoding.UTF8.GetString m.Key)
     return () }
 
-  let handleBatch (ms:Message[]) = async {
-    Log.info "handling_batch|size=%i" ms.Length
+  let handleBatch (ms:ConsumerMessageSet) = async {
+    Log.info "handling_batch|size=%i partition=%i" ms.messages.Length ms.partition
+    //let! _ = consumer.CommitAsync(ms.messages.[ms.messages.Length - 1]) |> Async.AwaitTask
+    //failwithf "test error"
+    do! Async.Sleep 100000
     return () }
 
   use counter = Metrics.counter Log 5000
@@ -80,18 +91,18 @@ let go = async {
 
   let handleBatch = 
     handleBatch
-    |> Metrics.throughputAsyncTo counter (fun (ms,_) -> ms.Length)
+    |> Metrics.throughputAsyncTo counter (fun (ms,_) -> ms.messages.Length)
 
   //do!
   //  Consumer.streamBuffered consumer 1000 1000
   //  |> AsyncSeq.iterAsync handleBatch
 
-  do! Consumer.consume consumer 1000 1000 (snd >> handleBatch)
+  do! Consumer.consume consumer 1000 1000 handleBatch
 
   //while true do
   //  let mutable m = Unchecked.defaultof<_>
   //  if consumer.Consume(&m, 1000) then
-  //    do! handle m      
+  //    do! handle m
   //  else
   //    Log.info "skipped"
 

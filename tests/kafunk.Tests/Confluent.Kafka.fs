@@ -1,11 +1,13 @@
 ﻿namespace Confluent.Kafka
 
 open System
+open System.Collections.Generic
+open System.Collections.Concurrent
 open System.Text
 open System.Threading
 open System.Threading.Tasks
 open Confluent.Kafka
-open System.Collections.Generic
+open FSharp.Control
 
 type TopicName = string
 
@@ -32,7 +34,7 @@ module Message =
   let internal errorException (m:Message) (e:Error) =
     exn(errorMessage m e)
 
-  let ensureNotError (m:Message) =
+  let throwIfError (m:Message) =
     if m.Error.HasError then
       raise (errorException m m.Error)
 
@@ -143,16 +145,17 @@ module Producer =
           member __.HandleDeliveryReport m =
             if throwOnError && m.Error.HasError then
               tcs.TrySetException ((Message.errorException m m.Error)) |> ignore
-            let i' = Interlocked.Increment &i
-            rs.[i'] <- m
-            if i' = expectedMessageCount - 1 then
-              tcs.SetResult rs
+            else
+              let i' = Interlocked.Increment &i
+              rs.[i'] <- m
+              if i' = expectedMessageCount - 1 then
+                tcs.SetResult rs
           member __.MarshalData = false }
     handler,tcs.Task
 
   let private produceInternal (p:Producer) (topic:string) (throwOnError:bool) (k:ArraySegment<byte>, v:ArraySegment<byte>) : Async<Message> = async {
     let! m = p.ProduceAsync (topic, k.Array, k.Offset, k.Count, v.Array, v.Offset, v.Count, true) |> Async.AwaitTask
-    if throwOnError then Message.ensureNotError m
+    if throwOnError then Message.throwIfError m
     return m }
 
   let private produceBatchedInternal (p:Producer) (topic:string) (throwOnError:bool) (ms:(ArraySegment<byte> * ArraySegment<byte>)[]) : Async<Message[]> = async {
@@ -235,6 +238,74 @@ type ConsumerMessageSet = {
     if ms.messages.Length = 0 then -1L
     else ms.messages.[0].Offset.Value
 
+
+type OffsetCommitQueue = private {
+  consumer : Consumer
+  mbOffsets : MailboxProcessor<TopicPartitionOffset[]>
+  mbFlushes : MailboxProcessor<TaskCompletionSource<unit>>
+}
+
+[<CompilationRepresentationAttribute(CompilationRepresentationFlags.ModuleSuffix)>]
+module OffsetCommitQueue =
+  
+  let private mb () = MailboxProcessor.Start (fun _ -> async.Return())
+
+  let private mbStream (mb:MailboxProcessor<_>) = AsyncSeq.replicateInfiniteAsync (async { return! mb.Receive() })
+
+  let private mergeChoice3 (s1:AsyncSeq<'a>) (s2:AsyncSeq<'b>) (s3:AsyncSeq<'c>) =
+    AsyncSeq.mergeAll [ s1 |> AsyncSeq.map Choice1Of3 ; s2 |> AsyncSeq.map Choice2Of3 ; s3 |> AsyncSeq.map Choice3Of3 ]
+
+  let create (c:Consumer) =
+    { consumer = c ; mbOffsets = mb () ; mbFlushes = mb () }
+
+  let start (q:OffsetCommitQueue) =
+    let ticks = AsyncSeq.intervalMs 10000
+    let flushes = mbStream q.mbFlushes
+    let offsets = mbStream q.mbOffsets
+    let commit (offsets:TopicPartitionOffset[]) = async {
+      if offsets.Length > 0 then
+        let! _ = q.consumer.CommitAsync offsets |> Async.AwaitTask
+        ()
+      return () }
+      //mbStream q.mbOffsets
+      //|> AsyncSeq.bufferByTime 1000
+      //|> AsyncSeq.map (fun os ->
+      //  os
+      //  |> Seq.concat
+      //  |> Seq.groupBy (fun o -> o.Topic, o.Partition)
+      //  |> Seq.map (fun ((t,p),xs) -> 
+      //    let o = xs |> Seq.map (fun o -> o.Offset.Value) |> Seq.max
+      //    TopicPartitionOffset(t,p,Offset(o)))
+      //  |> Seq.toArray)
+    mergeChoice3 ticks flushes offsets
+    |> AsyncSeq.foldAsync (fun (offsets:TopicPartitionOffset[]) msg -> async {
+      match msg with
+      | Choice1Of3 _ -> 
+        do! commit offsets
+        return offsets
+      | Choice2Of3 rep ->
+        try 
+          do! commit offsets
+          rep.SetResult ()
+        with ex -> 
+          rep.SetException ex
+        return offsets
+      | Choice3Of3 os' ->         
+        return offsets }) [||]
+    |> Async.Ignore
+
+  let enqueue (q:OffsetCommitQueue) (os:TopicPartitionOffset[]) =
+    q.mbOffsets.Post os
+
+  let enqueueMessages (q:OffsetCommitQueue) (ms:Message[]) =
+    enqueue q (ms |> Array.map (fun m -> TopicPartitionOffset(m.Topic, m.Partition, m.Offset)))
+
+  let flush (q:OffsetCommitQueue) : Async<unit> = async {
+    let tcs = TaskCompletionSource<unit>()
+    q.mbFlushes.Post tcs
+    return! tcs.Task |> Async.AwaitTask }
+
+
 /// Operations on consumers.
 [<CompilationRepresentationAttribute(CompilationRepresentationFlags.ModuleSuffix)>]
 module Consumer =
@@ -250,40 +321,47 @@ module Consumer =
     consumer.Subscribe cfg.topic
     consumer
 
-  let private handlePartitioned (ms:Message[]) (handle:ConsumerMessageSet -> Async<unit>) =
-    ms 
-    |> Array.groupBy (fun m -> m.Topic, m.Partition) 
-    |> Seq.map (fun ((t,p),ms) -> handle { ConsumerMessageSet.topic = t ; partition = p ; messages = ms })
-    |> Async.Parallel
-    |> Async.Ignore
-
+  /// Consumes messages, buffers them by time and batchSize and calls the specified handler.
+  /// The handler is called sequentially within a partition and in parallel across partitions.
+  /// @timeoutMs - the poll timeout; for each call, the timeout is reduced by the delta between the current time and the last handler call.
+  /// @batchSize - the per-partition batch size limit. When the limit is reached, the handler is called.
   let consume (c:Consumer) (timeoutMs:int) (batchSize:int) (handle:ConsumerMessageSet -> Async<unit>) : Async<unit> = async {
-    let! ct = Async.CancellationToken
-    let mutable m = Unchecked.defaultof<_>
-    let mutable last = DateTime.UtcNow
-    let buf = ResizeArray<_>()
-    while not ct.IsCancellationRequested do
-      let now = DateTime.UtcNow
-      let dt = int (DateTime.UtcNow - last).TotalMilliseconds
-      last <- now
-      let timeoutMs = max (timeoutMs - dt) 0
-      if timeoutMs > 0 && c.Consume(&m, timeoutMs) then
-        Message.ensureNotError m
-        buf.Add m
-        if buf.Count >= batchSize then
-          let arr = buf.ToArray()
-          do! handlePartitioned arr handle
-          buf.Clear ()
-      else
-        if buf.Count > 0 then
-          let arr = buf.ToArray()
-          do! handlePartitioned arr handle
-          buf.Clear () }
+    // TODO: pollTimeout vs batchTimeout
+    let! ct = Async.CancellationToken    
+    use cts = CancellationTokenSource.CreateLinkedTokenSource ct
+    let tcs = TaskCompletionSource<unit>()    
+    let bufs = Dictionary<TopicName * Partition, BlockingCollection<Message>>()    
+    let close () =
+      for kvp in bufs do
+        try kvp.Value.CompleteAdding() with _ -> ()
+    tcs.Task.ContinueWith(fun (_:Task<unit>) -> cts.Cancel()) |> ignore
+    let consumePartition (t:TopicName) (p:Partition) (buf:BlockingCollection<Message>) = async {
+      try
+        do!
+          buf.GetConsumingEnumerable()
+          |> AsyncSeq.ofSeq
+          |> AsyncSeq.bufferByCountAndTime batchSize timeoutMs
+          |> AsyncSeq.iterAsync (fun ms -> handle { ConsumerMessageSet.topic = t ; partition = p ; messages = ms })
+      with ex ->
+        tcs.TrySetException ex |> ignore }
+    try
+      let mutable m = Unchecked.defaultof<_>
+      while (not ct.IsCancellationRequested) && (not tcs.Task.IsCompleted) do
+        if c.Consume(&m, timeoutMs) then
+          Message.throwIfError m
+          let mutable buf = Unchecked.defaultof<_>
+          if not (bufs.TryGetValue((m.Topic,m.Partition),&buf)) then
+            buf <- new BlockingCollection<_>(batchSize)
+            bufs.Add ((m.Topic,m.Partition),buf)
+            Async.Start (consumePartition m.Topic m.Partition buf, cts.Token)
+          buf.Add m
+      if tcs.Task.IsFaulted then
+        raise tcs.Task.Exception
+    finally
+      close () }
 
   // -------------------------------------------------------------------------------------------------
   // AsyncSeq adapters
-
-  open FSharp.Control
 
   /// Represents repeated calls to Consumer.Consume with the specified timeout as an AsyncSeq.
   /// If a message is marked as an error, raises an exception.
@@ -291,7 +369,7 @@ module Consumer =
     let mutable m = Unchecked.defaultof<_>
     while true do
       if c.Consume(&m, timeoutMs) then
-        Message.ensureNotError m
+        Message.throwIfError m
         yield m }
 
   /// Represents repeated calls to Consumer.Consume with the specified timeout as an AsyncSeq.
@@ -302,16 +380,17 @@ module Consumer =
     let buf = ResizeArray<_>()
     while true do
       let now = DateTime.UtcNow
-      let dt = int (DateTime.UtcNow - last).TotalMilliseconds
-      last <- now
+      let dt = int (now - last).TotalMilliseconds      
       let timeoutMs = max (timeoutMs - dt) 0
       if timeoutMs > 0 && c.Consume(&m, timeoutMs) then
-        Message.ensureNotError m
+        last <- now
+        Message.throwIfError m
         buf.Add m
         if buf.Count >= batchSize then
           yield buf.ToArray()
           buf.Clear ()
       else
+        last <- now
         if buf.Count > 0 then
           yield buf.ToArray()
           buf.Clear () }

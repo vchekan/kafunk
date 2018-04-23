@@ -42,6 +42,8 @@ let counter = Metrics.counter Log (1000 * 5)
 let config =
   [ 
       
+    "log_level", box 0
+    "debug", box "broker,topic,msg"
     "bootstrap.servers", box host 
     "acks", box "all"
     //"batch.size", box 1000000
@@ -75,26 +77,47 @@ let go = async {
 
   use producer = new Producer(config)
 
-  producer.OnLog |> Event.add (fun e ->
-    Log.info "librdkafka|name=%s facility=%s message=%s" e.Name e.Facility e.Message
-  )
+  producer.OnError |> Event.add (fun e -> Log.error "%s" (e.ToString()))
+  producer.OnLog |> Event.add (fun e -> Log.info "librdkafka|name=%s facility=%s message=%s" e.Name e.Facility e.Message)
 
-  let produce (m:string) = async {
-    let! res = Producer.produceString producer topic ("",m)
-    return res }
+  if false then
 
-  let produce = 
-    produce
-    |> Metrics.throughputAsyncTo counter (fun (_,r) -> 1)
+    let produce (m:string) = async {
+      let! res = Producer.produceString producer topic ("",m)
+      return res }
 
-  return!
-    Seq.init (int N) id
-    |> Seq.map (fun i -> async {
-      let! res = produce payload
-      Interlocked.Add(&completed, 1L) |> ignore
-      return()
-    })
-    |> Async.parallelThrottledIgnore parallelism }
+    let produce = 
+      produce
+      |> Metrics.throughputAsyncTo counter (fun (_,r) -> 1)
+
+    return!
+      Seq.init (int N) id
+      |> Seq.map (fun i -> async {
+        let! res = produce payload
+        Interlocked.Add(&completed, 1L) |> ignore
+        return()
+      })
+      |> Async.parallelThrottledIgnore parallelism 
+
+  else
+
+    let produceBatch (ms:string[]) = async {
+      let! res = Producer.produceBatchedString producer topic (ms |> Array.map (fun m -> "",m))
+      return res }
+
+    let produceBatch = 
+      produceBatch
+      |> Metrics.throughputAsyncTo counter (fun (_,r) -> r.Length)
+
+    return!
+      Seq.init (int N) id
+      |> Seq.chunkBySize batchSize
+      |> Seq.map (fun is -> async {
+        let! res = produceBatch (is |> Array.map (fun _ -> payload))
+        Interlocked.Add(&completed, int64 res.Length) |> ignore
+        return()
+      })
+      |> Async.parallelThrottledIgnore parallelism }
 
 Async.RunSynchronously go
 
