@@ -25,6 +25,47 @@ module internal Prelude =
     if isNull s then ArraySegment()
     else Encoding.UTF8.GetBytes s |> arrayToSegment
 
+  type Async with
+    
+    static member StartWithContinuationsThreadPool (a:Async<'a>, ok:'a -> unit, err:exn -> unit, cnc:OperationCanceledException -> unit, ct:CancellationToken) =
+      let a = async {
+        do! Async.SwitchToThreadPool ()
+        return! a }
+      Async.StartWithContinuations (a,ok,err,cnc,ct)
+
+    /// Like Async.Parallel but short-circuits on exceptions/cancellations, escalating and cancelling other computations.
+    static member ParallelEscalateOnError (xs:Async<'a> seq) : Async<'a[]> = async {
+      let! ct = Async.CancellationToken
+      return!
+        Async.FromContinuations <| fun (ok,err,cnc) ->
+          let mutable completed = 0
+          let xs = xs |> Seq.toArray
+          let rs = Array.zeroCreate xs.Length
+          let cts = CancellationTokenSource.CreateLinkedTokenSource ct
+          let ok i a = 
+            rs.[i] <- a
+            if Interlocked.Increment &completed = xs.Length then
+              ok rs
+          let err e = 
+            cts.Cancel ()
+            err e
+          let cnc e = 
+            cts.Cancel ()
+            cnc e
+          for i = 0 to xs.Length - 1 do
+            if not cts.IsCancellationRequested then
+              Async.StartWithContinuationsThreadPool (xs.[i], ok i, err, cnc, cts.Token) }
+        
+    static member AwaitTaskCancellationAsError (t:Task<'a>) : Async<'a> = async {
+      let! ct = Async.CancellationToken
+      return!
+        Async.FromContinuations <| fun (ok,err,_) ->
+          t.ContinueWith ((fun (t:Task<'a>) ->
+            if t.IsFaulted then err t.Exception
+            elif t.IsCanceled then err (OperationCanceledException("Task wrapped with Async has been cancelled."))
+            elif t.IsCompleted then ok t.Result
+            else failwith "unreachable"), ct) |> ignore }
+
 [<CompilationRepresentationAttribute(CompilationRepresentationFlags.ModuleSuffix)>]
 module Message =
   
@@ -274,10 +315,12 @@ type private OffsetCommitQueueState = {
 
 /// An accumulating offset commit queue.
 type OffsetCommitQueue internal (consumer:Consumer) =   
-  
-  let mbOffsets : MailboxProcessor<TopicPartitionOffset[]> = MailboxProcessor.Start (fun _ -> async.Return())
-  let mbFlushes : MailboxProcessor<TaskCompletionSource<unit>> = MailboxProcessor.Start (fun _ -> async.Return())
-  let committed : Event<TopicPartitionOffset[]> = new Event<_>()
+    
+  let cts = new CancellationTokenSource()
+  let mutable task : Task<unit> = Unchecked.defaultof<_>
+  let mbOffsets : MailboxProcessor<TopicPartitionOffset[]> = MailboxProcessor.Start ((fun _ -> async.Return()), cts.Token)
+  let mbFlushes : MailboxProcessor<TaskCompletionSource<unit>> = MailboxProcessor.Start ((fun _ -> async.Return()), cts.Token)
+  let committed : Event<CommittedOffsets> = new Event<_>()
   
   let mbStream (mb:MailboxProcessor<'a>) : AsyncSeq<'a> = 
     AsyncSeq.replicateInfiniteAsync (async { return! mb.Receive() })
@@ -290,11 +333,16 @@ type OffsetCommitQueue internal (consumer:Consumer) =
       s4 |> AsyncSeq.map Choice4Of5
       s5 |> AsyncSeq.map Choice5Of5 ]
   
+  /// The Task representing the offset flush process.
+  member __.Task = 
+    __.EnsureStarted ()
+    task
+
   /// Event triggered when enqueued offsets are committed.
   member __.OnOffsetsCommitted = committed.Publish
 
   /// Starts the offset commit queue process.
-  member __.Start (commitIntervalMs:int) = async {
+  member __.StartInternal (commitIntervalMs:int) = async {
        
     // commits accumulated offsets
     let commit (s:OffsetCommitQueueState) = async {
@@ -304,7 +352,7 @@ type OffsetCommitQueue internal (consumer:Consumer) =
         let! res = consumer.CommitAsync offsets |> Async.AwaitTask
         if (res.Error.HasError) then
           failwithf "offset_commit_error|code=%O reason=%s" res.Error.Code res.Error.Reason
-        committed.Trigger offsets
+        committed.Trigger res
         return () }
 
     let ticks = AsyncSeq.intervalMs commitIntervalMs
@@ -335,26 +383,44 @@ type OffsetCommitQueue internal (consumer:Consumer) =
           return OffsetCommitQueueState.assign s assignedPartitions }) OffsetCommitQueueState.Empty
       |> Async.Ignore }
 
+  member internal __.Start (commitIntervalMs:int) =
+    lock cts (fun () ->
+      if isNull task then
+        task <- Async.StartAsTask (__.StartInternal commitIntervalMs, cancellationToken = cts.Token)
+      else
+        failwith "already_started")
+
+  member __.Stop () =
+    cts.Cancel ()
+
+  member private __.EnsureStarted () =
+    if cts.IsCancellationRequested then
+      failwith "must be started"
+
   /// Enqueues offsets to be committed asynchronously.
   member __.Enqueue os = 
+    __.EnsureStarted ()
     mbOffsets.Post os
 
   member __.Flush () : Async<unit> = async {
+    __.EnsureStarted ()
     let tcs = TaskCompletionSource<unit>()
     mbFlushes.Post tcs
     return! tcs.Task |> Async.AwaitTask }
+
+  interface IDisposable with
+    member __.Dispose () = __.Stop ()
 
 /// Operations of the offset commit queue.
 [<CompilationRepresentationAttribute(CompilationRepresentationFlags.ModuleSuffix)>]
 module OffsetCommitQueue =
   
   /// Creates an offset commit queue.
-  let create (c:Consumer) = new OffsetCommitQueue(c)
-
-  /// Starts the offset commit queue.
-  let start (q:OffsetCommitQueue) (commitIntervalMs:int) =
+  let start (c:Consumer) (commitIntervalMs:int) = 
+    let q = new OffsetCommitQueue(c)
     q.Start commitIntervalMs
-
+    q
+    
   /// Enqueues offsets to be committed asynchronously.
   let enqueue (q:OffsetCommitQueue) (os:TopicPartitionOffset[]) =
     q.Enqueue os
@@ -402,42 +468,64 @@ module Consumer =
       for kvp in queues do
         try kvp.Value.CompleteAdding() with _ -> ()
     tcs.Task.ContinueWith(fun (_:Task<unit>) -> cts.Cancel()) |> ignore
-    let consumePartition (t:TopicName, p:Partition) (buf:BlockingCollection<Message>) = async {      
+    let consumePartition (t:TopicName, p:Partition) (queue:BlockingCollection<Message>) = async {      
       try
-        use buf = buf
+        use queue = queue
         do!
-          buf.GetConsumingEnumerable ()
+          queue.GetConsumingEnumerable ()
           |> AsyncSeq.ofSeq
           |> AsyncSeq.bufferByCountAndTime batchSize batchLingerMs
           |> AsyncSeq.iterAsync (fun ms -> handle { ConsumerMessageSet.topic = t ; partition = p ; messages = ms })
-      with ex ->        
+      with ex ->
+        tcs.TrySetException ex |> ignore }    
+    let poll = async {
+      try
+        let buf = ResizeArray<_>()
+        let mutable m = Unchecked.defaultof<_>
+        while (not cts.Token.IsCancellationRequested) do
+          if c.Consume(&m, pollTimeoutMs) then
+            Message.throwIfError m
+            buf.Add m
+            while c.Consume(&m, 0) && (not cts.Token.IsCancellationRequested) do
+              Message.throwIfError m  
+              buf.Add m
+            buf 
+            |> Seq.groupBy (fun m -> m.Topic,m.Partition)
+            |> Seq.toArray
+            |> Array.Parallel.iter (fun (tp,ms) ->
+              let mutable queue = Unchecked.defaultof<_>
+              if not (queues.TryGetValue (tp,&queue)) then
+                queue <- new BlockingCollection<_>(batchSize)
+                queues.TryAdd (tp,queue) |> ignore
+                Async.Start (consumePartition tp queue, cts.Token)
+              for m in ms do
+                queue.Add m)
+            buf.Clear ()
+      with ex ->
         tcs.TrySetException ex |> ignore }
-    let pollBuf = ResizeArray<_>()
-    try
-      let mutable m = Unchecked.defaultof<_>
-      while (not cts.Token.IsCancellationRequested) do
-        if c.Consume(&m, pollTimeoutMs) then
-          Message.throwIfError m
-          pollBuf.Add m
-          while c.Consume(&m, 0) do
-            Message.throwIfError m  
-            pollBuf.Add m
-          pollBuf 
-          |> Seq.groupBy (fun m -> m.Topic,m.Partition)
-          |> Seq.toArray
-          |> Array.Parallel.iter (fun (tp,ms) ->            
-            let mutable queue = Unchecked.defaultof<_>
-            if not (queues.TryGetValue (tp,&queue)) then
-              queue <- new BlockingCollection<_>(batchSize)
-              queues.TryAdd (tp,queue) |> ignore
-              Async.Start (consumePartition tp queue, cts.Token)
-            for m in ms do
-              queue.Add m)
-          pollBuf.Clear ()
-      if tcs.Task.IsFaulted then
-        raise tcs.Task.Exception
-    finally
-      close () }
+    Async.Start (poll, cts.Token)
+    try return! tcs.Task |> Async.AwaitTaskCancellationAsError finally close () }
+
+  /// Consumes messages, buffers them by time and batchSize and calls the specified handler.
+  /// The handler is called sequentially within a partition and in parallel across partitions.
+  /// Offsets are commited periodically at the specified interval.
+  /// @q - the offset commit queue.
+  /// @pollTimeoutMs - the consumer poll timeout.
+  /// @batchLingerMs - the time to wait to form a per-partition batch; when time limit is reached the handler is called.
+  /// @batchSize - the per-partition batch size limit; when the limit is reached, the handler is called.
+  let consumeCommitQueue
+    (c:Consumer)
+    (q:OffsetCommitQueue)
+    (pollTimeoutMs:int)
+    (batchLingerMs:int) 
+    (batchSize:int) 
+    (handle:ConsumerMessageSet -> Async<unit>) : Async<unit> = async {
+    let handle ms = async {
+      do! handle ms
+      let os = ms.messages |> Array.map (fun m -> m.TopicPartitionOffset)
+      OffsetCommitQueue.enqueue q os }
+    let consume = consume c pollTimeoutMs batchLingerMs batchSize handle
+    return! Async.ParallelEscalateOnError [ consume ; Async.AwaitTask q.Task ] |> Async.Ignore }
 
   /// Consumes messages, buffers them by time and batchSize and calls the specified handler.
   /// The handler is called sequentially within a partition and in parallel across partitions.
@@ -452,17 +540,9 @@ module Consumer =
     (pollTimeoutMs:int)
     (batchLingerMs:int) 
     (batchSize:int) 
-    (handle:ConsumerMessageSet -> Async<unit>) : Async<unit> = async {
-    let q = OffsetCommitQueue.create c
-    let handle ms = async {
-      do! handle ms
-      let os = ms.messages |> Array.map (fun m -> m.TopicPartitionOffset)
-      OffsetCommitQueue.enqueue q os }
-    let! consumeProc = Async.StartChild (consume c pollTimeoutMs batchLingerMs batchSize handle)
-    let! commitProc = Async.StartChild (OffsetCommitQueue.start q commitIntervalMs)    
-    let! _ = consumeProc
-    let! _ = commitProc    
-    return () }
+    (handle:ConsumerMessageSet -> Async<unit>) : Async<unit> =
+    let q = OffsetCommitQueue.start c commitIntervalMs
+    consumeCommitQueue c q pollTimeoutMs batchLingerMs batchSize handle
 
   // -------------------------------------------------------------------------------------------------
   // AsyncSeq adapters

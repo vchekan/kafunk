@@ -33,13 +33,19 @@ let config =
     //"max.in.flight.requests.per.connection", box 1
     "default.topic.config", box <| (dict ["auto.offset.reset", box "earliest"])
     "enable.auto.commit", box false
-    "fetch.message.max.bytes", box 10000
+    //"fetch.message.max.bytes", box 10000
 
   ] |> dict
 
 let go = async {
   
-  let consumer = new Consumer (config)
+  use consumer = new Consumer (config)  
+  use commitQueue = OffsetCommitQueue.start consumer 10000
+
+  commitQueue.OnOffsetsCommitted
+  |> Event.add (fun m -> 
+    Log.info "committed_offsets|error=%O offsets=%s" 
+      m.Error (m.Offsets |> Seq.map (fun o -> sprintf "[p=%i o=%i e=%O]" o.Partition o.Offset.Value o.Error) |> String.concat ";"))
   
   consumer.OnLog 
   |> Event.add (fun m -> Log.info "log|leve=%i name=%s facility=%s m=%s" m.Level m.Name m.Facility m.Message)
@@ -80,15 +86,15 @@ let go = async {
   let handleBatch (ms:ConsumerMessageSet) = async {
     Log.info "handling_batch|size=%i partition=%i" ms.messages.Length ms.partition
     //let! _ = consumer.CommitAsync(ms.messages.[ms.messages.Length - 1]) |> Async.AwaitTask
-    //failwithf "test error"
+    failwithf "test error"
     //do! Async.Sleep 100000
     return () }
 
   use counter = Metrics.counter Log 5000
 
-  let handle = 
-    handle
-    |> Metrics.throughputAsyncTo counter (fun _ -> 1)
+  //let handle = 
+  //  handle
+  //  |> Metrics.throughputAsyncTo counter (fun _ -> 1)
 
   let handleBatch = 
     handleBatch
@@ -99,7 +105,8 @@ let go = async {
   //  |> AsyncSeq.iterAsync handleBatch
 
   //do! Consumer.consume consumer 1000 1000 1000 handleBatch
-  do! Consumer.consumeCommitInterval consumer 10000 1000 1000 1000 handleBatch
+  //do! Consumer.consumeCommitInterval consumer 10000 1000 1000 1000 handleBatch
+  do! Consumer.consumeCommitQueue consumer commitQueue 1000 1000 1000 handleBatch
 
   //while true do
   //  let mutable m = Unchecked.defaultof<_>
