@@ -97,29 +97,29 @@ type ProducerConfig = {
 
 /// Producer compression codec.
 and CompressionCodec =
-  | None
+  | NoCodec
   | GZip
   | Snappy
   | LZ4
   with  
     override __.ToString () =
       match __ with
-      | None -> "none"
+      | NoCodec -> "none"
       | GZip -> "gzip"
       | Snappy -> "snappy"
       | LZ4 -> "lz4"
 
 /// Producer required acks.
 and RequiredAcks =
-  | AllInSync
-  | Local
-  | None
+  | AllInSyncAck
+  | LocalAck
+  | NoAck
   with 
     override __.ToString () =
       match __ with
-      | AllInSync -> "all"
-      | Local -> "local"
-      | None -> "none"
+      | AllInSyncAck -> "all"
+      | LocalAck -> "local"
+      | NoAck -> "none"
 
 /// Operations on producers.
 [<CompilationRepresentationAttribute(CompilationRepresentationFlags.ModuleSuffix)>]
@@ -239,82 +239,144 @@ type ConsumerMessageSet = {
     else ms.messages.[0].Offset.Value
 
 
-type OffsetCommitQueue = private {
-  consumer : Consumer
-  mbOffsets : MailboxProcessor<TopicPartitionOffset[]>
-  mbFlushes : MailboxProcessor<TaskCompletionSource<unit>>
-}
 
+type private OffsetCommitQueueState = {  
+  assignment : Set<string * int>
+  offsets : Dictionary<string * int, int64>
+} with
+  
+  static member Empty = { assignment = Set.empty ; offsets = Dictionary<_,_>() }
+  
+  static member revoke (s:OffsetCommitQueueState) (tps:TopicPartition seq) =
+    { assignment = (s.assignment,tps) ||> Seq.fold (fun a tp -> Set.remove (tp.Topic,tp.Partition) a)
+      offsets = s.offsets }
+      
+  static member assign (s:OffsetCommitQueueState) (tps:TopicPartition seq) =
+    { assignment = tps |> Seq.map (fun tp -> tp.Topic, tp.Partition) |> set
+      offsets = s.offsets }
+  
+  /// Returns the latest committed offsets respecting the current assignment.
+  static member getOffsets (s:OffsetCommitQueueState) =
+    s.offsets 
+    |> Seq.choose (fun kvp -> 
+      let t,p = fst kvp.Key, snd kvp.Key
+      if Seq.contains (t,p) s.assignment then TopicPartitionOffset(t, p, Offset(kvp.Value)) |> Some
+      else None)
+    |> Seq.toArray      
+    
+  static member updateOffsets (s:OffsetCommitQueueState) (os':TopicPartitionOffset seq) = 
+    let mutable o = Unchecked.defaultof<_>
+    for o' in os' do
+      let tp = o'.Topic,o'.Partition
+      if s.offsets.TryGetValue (tp,&o) then s.offsets.[tp] <- max o'.Offset.Value o
+      else s.offsets.[tp] <- o'.Offset.Value
+    s
+
+/// An accumulating offset commit queue.
+type OffsetCommitQueue internal (consumer:Consumer) =   
+  
+  let mbOffsets : MailboxProcessor<TopicPartitionOffset[]> = MailboxProcessor.Start (fun _ -> async.Return())
+  let mbFlushes : MailboxProcessor<TaskCompletionSource<unit>> = MailboxProcessor.Start (fun _ -> async.Return())
+  let committed : Event<TopicPartitionOffset[]> = new Event<_>()
+  
+  let mbStream (mb:MailboxProcessor<'a>) : AsyncSeq<'a> = 
+    AsyncSeq.replicateInfiniteAsync (async { return! mb.Receive() })
+  
+  let mergeChoice5 (s1:AsyncSeq<'a>) (s2:AsyncSeq<'b>) (s3:AsyncSeq<'c>) (s4:AsyncSeq<'d>) (s5:AsyncSeq<'e>) : AsyncSeq<Choice<'a, 'b, 'c, 'd, 'e>> =
+    AsyncSeq.mergeAll [ 
+      s1 |> AsyncSeq.map Choice1Of5
+      s2 |> AsyncSeq.map Choice2Of5
+      s3 |> AsyncSeq.map Choice3Of5
+      s4 |> AsyncSeq.map Choice4Of5
+      s5 |> AsyncSeq.map Choice5Of5 ]
+  
+  /// Event triggered when enqueued offsets are committed.
+  member __.OnOffsetsCommitted = committed.Publish
+
+  /// Starts the offset commit queue process.
+  member __.Start (commitIntervalMs:int) = async {
+       
+    // commits accumulated offsets
+    let commit (s:OffsetCommitQueueState) = async {
+      let offsets = OffsetCommitQueueState.getOffsets s
+      if offsets.Length > 0 then
+        //printfn "committing_offsets|%A" offsets
+        let! res = consumer.CommitAsync offsets |> Async.AwaitTask
+        if (res.Error.HasError) then
+          failwithf "offset_commit_error|code=%O reason=%s" res.Error.Code res.Error.Reason
+        committed.Trigger offsets
+        return () }
+
+    let ticks = AsyncSeq.intervalMs commitIntervalMs
+    let flushes = mbStream mbFlushes
+    let commits = mbStream mbOffsets
+    let revokes = consumer.OnPartitionsRevoked |> AsyncSeq.ofObservableBuffered
+    let assigns = consumer.OnPartitionsAssigned |> AsyncSeq.ofObservableBuffered
+
+    return!
+      mergeChoice5 ticks flushes commits revokes assigns
+      |> AsyncSeq.foldAsync (fun (s:OffsetCommitQueueState) msg -> async {
+        match msg with
+        | Choice1Of5 _ -> 
+          do! commit s
+          return s
+        | Choice2Of5 rep ->
+          try 
+            do! commit s
+            rep.SetResult ()
+          with ex -> 
+            rep.SetException ex
+          return s
+        | Choice3Of5 committedOffsets ->
+          return OffsetCommitQueueState.updateOffsets s committedOffsets
+        | Choice4Of5 revokedPartitions ->
+          return OffsetCommitQueueState.revoke s revokedPartitions 
+        | Choice5Of5 assignedPartitions ->
+          return OffsetCommitQueueState.assign s assignedPartitions }) OffsetCommitQueueState.Empty
+      |> Async.Ignore }
+
+  /// Enqueues offsets to be committed asynchronously.
+  member __.Enqueue os = 
+    mbOffsets.Post os
+
+  member __.Flush () : Async<unit> = async {
+    let tcs = TaskCompletionSource<unit>()
+    mbFlushes.Post tcs
+    return! tcs.Task |> Async.AwaitTask }
+
+/// Operations of the offset commit queue.
 [<CompilationRepresentationAttribute(CompilationRepresentationFlags.ModuleSuffix)>]
 module OffsetCommitQueue =
   
-  let private mb () = MailboxProcessor.Start (fun _ -> async.Return())
+  /// Creates an offset commit queue.
+  let create (c:Consumer) = new OffsetCommitQueue(c)
 
-  let private mbStream (mb:MailboxProcessor<_>) = AsyncSeq.replicateInfiniteAsync (async { return! mb.Receive() })
+  /// Starts the offset commit queue.
+  let start (q:OffsetCommitQueue) (commitIntervalMs:int) =
+    q.Start commitIntervalMs
 
-  let private mergeChoice3 (s1:AsyncSeq<'a>) (s2:AsyncSeq<'b>) (s3:AsyncSeq<'c>) =
-    AsyncSeq.mergeAll [ s1 |> AsyncSeq.map Choice1Of3 ; s2 |> AsyncSeq.map Choice2Of3 ; s3 |> AsyncSeq.map Choice3Of3 ]
-
-  let create (c:Consumer) =
-    { consumer = c ; mbOffsets = mb () ; mbFlushes = mb () }
-
-  let start (q:OffsetCommitQueue) =
-    let ticks = AsyncSeq.intervalMs 10000
-    let flushes = mbStream q.mbFlushes
-    let offsets = mbStream q.mbOffsets
-    let commit (offsets:TopicPartitionOffset[]) = async {
-      if offsets.Length > 0 then
-        let! _ = q.consumer.CommitAsync offsets |> Async.AwaitTask
-        ()
-      return () }
-      //mbStream q.mbOffsets
-      //|> AsyncSeq.bufferByTime 1000
-      //|> AsyncSeq.map (fun os ->
-      //  os
-      //  |> Seq.concat
-      //  |> Seq.groupBy (fun o -> o.Topic, o.Partition)
-      //  |> Seq.map (fun ((t,p),xs) -> 
-      //    let o = xs |> Seq.map (fun o -> o.Offset.Value) |> Seq.max
-      //    TopicPartitionOffset(t,p,Offset(o)))
-      //  |> Seq.toArray)
-    mergeChoice3 ticks flushes offsets
-    |> AsyncSeq.foldAsync (fun (offsets:TopicPartitionOffset[]) msg -> async {
-      match msg with
-      | Choice1Of3 _ -> 
-        do! commit offsets
-        return offsets
-      | Choice2Of3 rep ->
-        try 
-          do! commit offsets
-          rep.SetResult ()
-        with ex -> 
-          rep.SetException ex
-        return offsets
-      | Choice3Of3 os' ->         
-        return offsets }) [||]
-    |> Async.Ignore
-
+  /// Enqueues offsets to be committed asynchronously.
   let enqueue (q:OffsetCommitQueue) (os:TopicPartitionOffset[]) =
-    q.mbOffsets.Post os
+    q.Enqueue os
 
-  let enqueueMessages (q:OffsetCommitQueue) (ms:Message[]) =
-    enqueue q (ms |> Array.map (fun m -> TopicPartitionOffset(m.Topic, m.Partition, m.Offset)))
-
-  let flush (q:OffsetCommitQueue) : Async<unit> = async {
-    let tcs = TaskCompletionSource<unit>()
-    q.mbFlushes.Post tcs
-    return! tcs.Task |> Async.AwaitTask }
-
+  /// Flushes all enqueued offsets.
+  let flush (q:OffsetCommitQueue) : Async<unit> =
+    q.Flush ()
 
 /// Operations on consumers.
 [<CompilationRepresentationAttribute(CompilationRepresentationFlags.ModuleSuffix)>]
 module Consumer =
 
+  /// Creates a consumer.
+  /// - OnPartitionsAssigned -> Assign
+  /// - OnPartitionsRevoked -> Unassign
   let createConfig (config:seq<string * obj>) =
     let consumer = new Consumer(dict config)
     consumer.OnPartitionsAssigned |> Event.add (fun m -> consumer.Assign m)
+    consumer.OnPartitionsRevoked |> Event.add (fun _ -> consumer.Unassign ())
     consumer
 
+  /// Creates a consumer.
   let create (ccfg:KafkaConfig) (cfg:ConsumerConfig) =
     let config = Seq.append (ccfg.ToList()) (cfg.ToList())
     let consumer = createConfig config
@@ -323,42 +385,84 @@ module Consumer =
 
   /// Consumes messages, buffers them by time and batchSize and calls the specified handler.
   /// The handler is called sequentially within a partition and in parallel across partitions.
-  /// @timeoutMs - the poll timeout; for each call, the timeout is reduced by the delta between the current time and the last handler call.
-  /// @batchSize - the per-partition batch size limit. When the limit is reached, the handler is called.
-  let consume (c:Consumer) (timeoutMs:int) (batchSize:int) (handle:ConsumerMessageSet -> Async<unit>) : Async<unit> = async {
-    // TODO: pollTimeout vs batchTimeout
+  /// @pollTimeoutMs - the consumer poll timeout.
+  /// @batchLingerMs - the time to wait to form a per-partition batch; when time limit is reached the handler is called.
+  /// @batchSize - the per-partition batch size limit; when the limit is reached, the handler is called.
+  let consume 
+    (c:Consumer) 
+    (pollTimeoutMs:int)
+    (batchLingerMs:int) 
+    (batchSize:int) 
+    (handle:ConsumerMessageSet -> Async<unit>) : Async<unit> = async {
     let! ct = Async.CancellationToken    
     use cts = CancellationTokenSource.CreateLinkedTokenSource ct
     let tcs = TaskCompletionSource<unit>()    
-    let bufs = Dictionary<TopicName * Partition, BlockingCollection<Message>>()    
+    let queues = Dictionary<TopicName * Partition, BlockingCollection<Message>>()    
     let close () =
-      for kvp in bufs do
+      for kvp in queues do
         try kvp.Value.CompleteAdding() with _ -> ()
     tcs.Task.ContinueWith(fun (_:Task<unit>) -> cts.Cancel()) |> ignore
-    let consumePartition (t:TopicName) (p:Partition) (buf:BlockingCollection<Message>) = async {
+    let consumePartition (t:TopicName, p:Partition) (buf:BlockingCollection<Message>) = async {      
       try
+        use buf = buf
         do!
-          buf.GetConsumingEnumerable()
+          buf.GetConsumingEnumerable ()
           |> AsyncSeq.ofSeq
-          |> AsyncSeq.bufferByCountAndTime batchSize timeoutMs
+          |> AsyncSeq.bufferByCountAndTime batchSize batchLingerMs
           |> AsyncSeq.iterAsync (fun ms -> handle { ConsumerMessageSet.topic = t ; partition = p ; messages = ms })
-      with ex ->
+      with ex ->        
         tcs.TrySetException ex |> ignore }
+    let pollBuf = ResizeArray<_>()
     try
       let mutable m = Unchecked.defaultof<_>
-      while (not ct.IsCancellationRequested) && (not tcs.Task.IsCompleted) do
-        if c.Consume(&m, timeoutMs) then
+      while (not cts.Token.IsCancellationRequested) do
+        if c.Consume(&m, pollTimeoutMs) then
           Message.throwIfError m
-          let mutable buf = Unchecked.defaultof<_>
-          if not (bufs.TryGetValue((m.Topic,m.Partition),&buf)) then
-            buf <- new BlockingCollection<_>(batchSize)
-            bufs.Add ((m.Topic,m.Partition),buf)
-            Async.Start (consumePartition m.Topic m.Partition buf, cts.Token)
-          buf.Add m
+          pollBuf.Add m
+          while c.Consume(&m, 0) do
+            Message.throwIfError m  
+            pollBuf.Add m
+          pollBuf 
+          |> Seq.groupBy (fun m -> m.Topic,m.Partition)
+          |> Seq.toArray
+          |> Array.Parallel.iter (fun (tp,ms) ->            
+            let mutable queue = Unchecked.defaultof<_>
+            if not (queues.TryGetValue (tp,&queue)) then
+              queue <- new BlockingCollection<_>(batchSize)
+              queues.Add (tp,queue)
+              Async.Start (consumePartition tp queue, cts.Token)
+            for m in ms do
+              queue.Add m)
+          pollBuf.Clear ()
       if tcs.Task.IsFaulted then
         raise tcs.Task.Exception
     finally
       close () }
+
+  /// Consumes messages, buffers them by time and batchSize and calls the specified handler.
+  /// The handler is called sequentially within a partition and in parallel across partitions.
+  /// Offsets are commited periodically at the specified interval.
+  /// @commitIntervalMs - the offset commit interval.
+  /// @pollTimeoutMs - the consumer poll timeout.
+  /// @batchLingerMs - the time to wait to form a per-partition batch; when time limit is reached the handler is called.
+  /// @batchSize - the per-partition batch size limit; when the limit is reached, the handler is called.
+  let consumeCommitInterval
+    (c:Consumer) 
+    (commitIntervalMs:int)
+    (pollTimeoutMs:int)
+    (batchLingerMs:int) 
+    (batchSize:int) 
+    (handle:ConsumerMessageSet -> Async<unit>) : Async<unit> = async {
+    let q = OffsetCommitQueue.create c
+    let handle ms = async {
+      do! handle ms
+      let os = ms.messages |> Array.map (fun m -> m.TopicPartitionOffset)
+      OffsetCommitQueue.enqueue q os }
+    let! consumeProc = Async.StartChild (consume c pollTimeoutMs batchLingerMs batchSize handle)
+    let! commitProc = Async.StartChild (OffsetCommitQueue.start q commitIntervalMs)    
+    let! _ = consumeProc
+    let! _ = commitProc    
+    return () }
 
   // -------------------------------------------------------------------------------------------------
   // AsyncSeq adapters

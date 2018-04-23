@@ -27,11 +27,12 @@ let config =
     "bootstrap.servers", box host 
     //"debug", box "broker,cgrp,topic,fetch"
     //"debug", box "broker,cgrp,topic"
+    //"debug", box "cgrp"
     //"linger.ms", box 100
     "group.id", box group
     //"max.in.flight.requests.per.connection", box 1
     "default.topic.config", box <| (dict ["auto.offset.reset", box "earliest"])
-    "enable.auto.commit", box true
+    "enable.auto.commit", box false
     "fetch.message.max.bytes", box 10000
 
   ] |> dict
@@ -55,7 +56,9 @@ let go = async {
     Log.info "partitions_assigned|%O" (m |> Seq.map (fun x -> sprintf "p=%i" x.Partition) |> String.concat ";"))
 
   consumer.OnPartitionsRevoked 
-  |> Event.add (fun m -> Log.info "partitions_revoked|%O" (m |> Seq.map (fun x -> sprintf "p=%i" x.Partition) |> String.concat ";"))
+  |> Event.add (fun m -> 
+    consumer.Unassign ()
+    Log.info "partitions_revoked|%O" (m |> Seq.map (fun x -> sprintf "p=%i" x.Partition) |> String.concat ";"))
 
   consumer.OnPartitionEOF 
   |> Event.add (fun m -> Log.info "eof|%O" m.Partition)
@@ -65,9 +68,7 @@ let go = async {
     Log.info "committed_offsets|error=%O offsets=%s" 
       m.Error (m.Offsets |> Seq.map (fun o -> sprintf "[p=%i o=%i e=%O]" o.Partition o.Offset.Value o.Error) |> String.concat ";"))
  
-  //consumer.Assign([ TopicPartition(topic, 0) ])
   consumer.Subscribe (topic)
-
 
   //let md = consumer.GetMetadata(true)
   //Log.info "metadata|%A" md.Topics
@@ -80,7 +81,7 @@ let go = async {
     Log.info "handling_batch|size=%i partition=%i" ms.messages.Length ms.partition
     //let! _ = consumer.CommitAsync(ms.messages.[ms.messages.Length - 1]) |> Async.AwaitTask
     //failwithf "test error"
-    do! Async.Sleep 100000
+    //do! Async.Sleep 100000
     return () }
 
   use counter = Metrics.counter Log 5000
@@ -97,7 +98,8 @@ let go = async {
   //  Consumer.streamBuffered consumer 1000 1000
   //  |> AsyncSeq.iterAsync handleBatch
 
-  do! Consumer.consume consumer 1000 1000 handleBatch
+  //do! Consumer.consume consumer 1000 1000 1000 handleBatch
+  do! Consumer.consumeCommitInterval consumer 10000 1000 1000 1000 handleBatch
 
   //while true do
   //  let mutable m = Unchecked.defaultof<_>
