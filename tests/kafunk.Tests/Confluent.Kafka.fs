@@ -397,7 +397,7 @@ module Consumer =
     let! ct = Async.CancellationToken    
     use cts = CancellationTokenSource.CreateLinkedTokenSource ct
     let tcs = TaskCompletionSource<unit>()    
-    let queues = Dictionary<TopicName * Partition, BlockingCollection<Message>>()    
+    let queues = ConcurrentDictionary<TopicName * Partition, BlockingCollection<Message>>()    
     let close () =
       for kvp in queues do
         try kvp.Value.CompleteAdding() with _ -> ()
@@ -429,7 +429,7 @@ module Consumer =
             let mutable queue = Unchecked.defaultof<_>
             if not (queues.TryGetValue (tp,&queue)) then
               queue <- new BlockingCollection<_>(batchSize)
-              queues.Add (tp,queue)
+              queues.TryAdd (tp,queue) |> ignore
               Async.Start (consumePartition tp queue, cts.Token)
             for m in ms do
               queue.Add m)
