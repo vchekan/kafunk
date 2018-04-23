@@ -85,6 +85,36 @@ module Message =
   let valueString (m:Message) =
     Encoding.UTF8.GetString m.Value
 
+/// Configuration.
+type Config = {
+  config : (string * obj) list
+} with
+  
+  static member Empty = { config = List.empty }
+
+  static member SafeConsumer = 
+    Config.Empty
+    |> Config.withMaxInFlight 1
+    |> Config.withEnabledAutoCommit false
+    |> Config.withAutoOffsetReset "error"
+
+  static member SafeProducer = 
+    Config.Empty
+    |> Config.withMaxInFlight 1
+    |> Config.withRequiredAcks "all"
+      
+  static member withConfig<'a> (n:string) (v:'a) (c:Config) : Config =
+    { c with config = (n,box v)::c.config }
+  
+  static member withBootstrapServers = Config.withConfig<string> "bootstrap.servers"
+  static member withClientId = Config.withConfig<string> "client.id"
+  static member withMaxInFlight = Config.withConfig<int> "max.in.flight.requests.per.connection"
+  static member withRequiredAcks = Config.withConfig<string> "acks"
+  static member withLingerMs = Config.withConfig<int> "linger.ms"
+  static member withEnabledAutoCommit = Config.withConfig<bool> "enable.auto.commit"
+  static member withAutoOffsetReset = Config.withConfig<string> "auto.offset.reset"
+
+
 /// Kafka connection configuration.
 type KafkaConfig = {
   

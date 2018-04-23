@@ -39,6 +39,11 @@ let config =
 
 let go = async {
   
+  //let config = 
+  //  Config.SafeConsumer
+  //  |> Config.withBootstrapServers ""
+  //  |> Config.withConfig "group.id" ""
+
   use consumer = new Consumer (config)  
   use commitQueue = OffsetCommitQueue.start consumer 10000
 
