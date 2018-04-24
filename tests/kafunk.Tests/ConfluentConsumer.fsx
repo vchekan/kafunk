@@ -22,30 +22,33 @@ let group = argiDefault 3 "existential-group"
 
 Log.info "running_consumer|host=%s topic=%s group=%s" host topic group
 
-let config =
-  [       
-    "bootstrap.servers", box host 
-    //"debug", box "broker,cgrp,topic,fetch"
-    //"debug", box "broker,cgrp,topic"
-    //"debug", box "cgrp"
-    //"linger.ms", box 100
-    "group.id", box group
-    //"max.in.flight.requests.per.connection", box 1
-    "default.topic.config", box <| (dict ["auto.offset.reset", box "earliest"])
-    "enable.auto.commit", box false
-    //"fetch.message.max.bytes", box 10000
+//let config =
+//  [       
+//    "bootstrap.servers", box host 
+//    //"debug", box "broker,cgrp,topic,fetch"
+//    //"debug", box "broker,cgrp,topic"
+//    //"debug", box "cgrp"
+//    //"linger.ms", box 100
+//    "group.id", box group
+//    //"max.in.flight.requests.per.connection", box 1
+//    "default.topic.config", box <| (dict ["auto.offset.reset", box "earliest"])
+//    "enable.auto.commit", box false
+//    //"fetch.message.max.bytes", box 10000
 
-  ] |> dict
+//  ] |> dict
 
 let go = async {
   
-  //let config = 
-  //  Config.SafeConsumer
-  //  |> Config.withBootstrapServers ""
-  //  |> Config.withConfig "group.id" ""
+  let config = 
+    Config.SafeConsumer
+    |> Config.withBootstrapServers host
+    |> Config.withGroupId group
+    |> Config.withAutoOffsetReset "earliest"
+    |> Config.withFetchMaxBytes 100000
+    //|> Config.withConfig "debug" "cgrp"
 
-  use consumer = new Consumer (config)  
-  use commitQueue = OffsetCommitQueue.start consumer 10000
+  let consumer = Consumer.create config
+  let commitQueue = OffsetCommitQueue.start consumer 10000
 
   commitQueue.OnOffsetsCommitted
   |> Event.add (fun m -> 
@@ -79,10 +82,8 @@ let go = async {
     Log.info "committed_offsets|error=%O offsets=%s" 
       m.Error (m.Offsets |> Seq.map (fun o -> sprintf "[p=%i o=%i e=%O]" o.Partition o.Offset.Value o.Error) |> String.concat ";"))
  
-  consumer.Subscribe (topic)
+  consumer.Subscribe topic
 
-  //let md = consumer.GetMetadata(true)
-  //Log.info "metadata|%A" md.Topics
 
   let handle (m:Message) = async {
     //Log.info "handing message|p=%i key=%s" m.Partition (Encoding.UTF8.GetString m.Key)
@@ -91,7 +92,7 @@ let go = async {
   let handleBatch (ms:ConsumerMessageSet) = async {
     Log.info "handling_batch|size=%i partition=%i" ms.messages.Length ms.partition
     //let! _ = consumer.CommitAsync(ms.messages.[ms.messages.Length - 1]) |> Async.AwaitTask
-    failwithf "test error"
+    //failwithf "test error"
     //do! Async.Sleep 100000
     return () }
 

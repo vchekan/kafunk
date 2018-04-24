@@ -9,10 +9,6 @@ open System.Threading.Tasks
 open Confluent.Kafka
 open FSharp.Control
 
-type TopicName = string
-
-type Partition = int
-
 [<AutoOpen>]
 module internal Prelude =
   
@@ -66,6 +62,7 @@ module internal Prelude =
             elif t.IsCompleted then ok t.Result
             else failwith "unreachable"), ct) |> ignore }
 
+/// Operations on messages.
 [<CompilationRepresentationAttribute(CompilationRepresentationFlags.ModuleSuffix)>]
 module Message =
   
@@ -75,134 +72,141 @@ module Message =
   let internal errorException (m:Message) (e:Error) =
     exn(errorMessage m e)
 
+  /// Throws an exception if the message has an error.
   let throwIfError (m:Message) =
     if m.Error.HasError then
       raise (errorException m m.Error)
 
-  let keyString (m:Message) =
-    Encoding.UTF8.GetString m.Key
+  /// Returns the message key as a UTF8 string.
+  let keyString (m:Message) = Encoding.UTF8.GetString m.Key
 
-  let valueString (m:Message) =
-    Encoding.UTF8.GetString m.Value
+  /// Returns the message value as a UTF8 string.
+  let valueString (m:Message) = Encoding.UTF8.GetString m.Value
 
-/// Configuration.
+///// Consumer offset reset.
+//type AutoOffsetReset =
+//  | Error
+//  | Earliest
+//  | Latest
+//  with
+//    override __.ToString () =
+//      match __ with
+//      | Error -> "error"
+//      | Earliest -> "earliest"
+//      | Latest -> "latest"
+
+///// Producer compression codec.
+//type CompressionCodec =
+//  | NoCompression
+//  | GZip
+//  | Snappy
+//  | LZ4
+//  with  
+//    override __.ToString () =
+//      match __ with
+//      | NoCompression -> "none"
+//      | GZip -> "gzip"
+//      | Snappy -> "snappy"
+//      | LZ4 -> "lz4"
+
+///// Producer required acks.
+//and RequiredAcks =
+//  | AllInSyncAck
+//  | LocalAck
+//  | NoAck
+//  with 
+//    override __.ToString () =
+//      match __ with
+//      | AllInSyncAck -> "all"
+//      | LocalAck -> "local"
+//      | NoAck -> "none"
+
+/// Kafka client configuration.
 type Config = {
-  config : (string * obj) list
+  config : Map<string, obj>
 } with
   
-  static member Empty = { config = List.empty }
+  /// Empty configuration.
+  static member Empty = { config = Map.empty }
+      
+  static member withConfig<'a> (n:string) (v:'a) (c:Config) : Config =
+    { c with config = Map.add n (box v) c.config }
 
+  static member withConfigs (xs:(string * obj) seq) (c:Config) : Config =
+    { c with config = (c.config,xs) ||> Seq.fold (fun c (k,v) -> Map.add k v c) }
+
+  static member withConfigKvps (xs:KeyValuePair<string, obj> seq) (c:Config) : Config =
+    c |> Config.withConfigs (xs |> Seq.map (fun kvp -> kvp.Key,kvp.Value))
+
+  static member ofKvps (xs:KeyValuePair<string, obj> seq) =
+    Config.Empty |> Config.withConfigKvps xs
+
+  static member removeConfig (n:string) (c:Config) =
+    { c with config = Map.remove n c.config }
+
+  static member withConfigMap (n:string) (vs:(string * obj) seq) (c:Config) : Config =
+    { c with
+          config =
+            match c.config |> Map.tryFind n with
+            | Some x -> 
+              let x = x :?> IDictionary<string, obj> |> Seq.map (fun kvp -> kvp.Key,kvp.Value) |> Map.ofSeq
+              let x = (x,vs) ||> Seq.fold (fun x (k,v) -> Map.add k v x) |> Map.toSeq |> dict
+              c.config |> Map. add n (box x)
+            | None -> 
+              c.config |> Map.add n (box (dict vs)) }
+
+  /// Returns the configuration.
+  static member toConfig (c:Config) = 
+    c.config |> Map.toSeq |> dict
+  
+  /// Safe consumer configuration.
+  /// - enable.auto.commit = false
+  /// - auto.offset.reset = error
   static member SafeConsumer = 
     Config.Empty
-    |> Config.withMaxInFlight 1
-    |> Config.withEnabledAutoCommit false
+    |> Config.withEnableAutoCommit false
     |> Config.withAutoOffsetReset "error"
 
+  /// Safe producer configuration.
+  /// - max.inflight = 1
+  /// - acks = all
   static member SafeProducer = 
     Config.Empty
     |> Config.withMaxInFlight 1
     |> Config.withRequiredAcks "all"
-      
-  static member withConfig<'a> (n:string) (v:'a) (c:Config) : Config =
-    { c with config = (n,box v)::c.config }
-  
+    |> Config.withConfig "produce.offset.report" true
+
   static member withBootstrapServers = Config.withConfig<string> "bootstrap.servers"
-  static member withClientId = Config.withConfig<string> "client.id"
+  
+  static member withClientId = Config.withConfig<string> "client.id"  
   static member withMaxInFlight = Config.withConfig<int> "max.in.flight.requests.per.connection"
-  static member withRequiredAcks = Config.withConfig<string> "acks"
+  
+  static member withEnableAutoCommit = Config.withConfig<bool> "enable.auto.commit"
+  static member withAutoOffsetReset x = Config.withConfigMap "default.topic.config" [ "auto.offset.reset",box x ]
+  static member withGroupId = Config.withConfig<string> "group.id"
+  static member withFetchMaxBytes = Config.withConfig<int> "fetch.message.max.bytes"
+  static member withFetchMinBytes = Config.withConfig<int> "fetch.min.bytes"
+  static member withFetchMaxWaitMs = Config.withConfig<int> "fetch.wait.max.ms"
+  static member withCheckCrc = Config.withConfig<bool> "check.crcs"
+  static member withHeartbeatInterval = Config.withConfig<int> "heartbeat.interval.ms"
+  static member withSessionTimeout = Config.withConfig<int> "session.timeout.ms"
+
   static member withLingerMs = Config.withConfig<int> "linger.ms"
-  static member withEnabledAutoCommit = Config.withConfig<bool> "enable.auto.commit"
-  static member withAutoOffsetReset = Config.withConfig<string> "auto.offset.reset"
-
-
-/// Kafka connection configuration.
-type KafkaConfig = {
-  
-  /// bootstrap.servers
-  host : string
-  
-  /// client.id
-  clientId : string
-  
-  /// max.inflight
-  maxInFlight : int
-  
-  /// socket.timeout.ms
-  socketTimeoutMs : int
-
-  /// socket.send.buffer.bytes
-  socketSendBufferBytes : int
-
-  /// socket.receive.buffer.byte
-  socketReceiveBufferBytes : int
-
-} with
-  
-  static member Create () = ()
-
-  /// Creates a collection of configuration values to be passed to Confluent.Kafka.
-  member __.ToList () : list<string * obj> =
-    [
-      "bootstrap.servers", box __.host
-      "client.id", box __.clientId
-      "max.in.flight.requests.per.connection", box __.maxInFlight
-    ]
-
-/// Producer configuration.
-type ProducerConfig = {
-  requiredAcks : RequiredAcks
-  compression : CompressionCodec
-  batchLingerMs : int
-  batchSizeCount : int
-} with
-  
-  static member Create () = ()
-
-  /// Creates a collection of configuration values to be passed to Confluent.Kafka.
-  member __.ToList () : list<string * obj> =
-    [
-      "acks", box (__.requiredAcks.ToString())
-      "batch.num.messages", box __.batchSizeCount
-      "linger.ms", box __.batchLingerMs
-    ]
-
-/// Producer compression codec.
-and CompressionCodec =
-  | NoCodec
-  | GZip
-  | Snappy
-  | LZ4
-  with  
-    override __.ToString () =
-      match __ with
-      | NoCodec -> "none"
-      | GZip -> "gzip"
-      | Snappy -> "snappy"
-      | LZ4 -> "lz4"
-
-/// Producer required acks.
-and RequiredAcks =
-  | AllInSyncAck
-  | LocalAck
-  | NoAck
-  with 
-    override __.ToString () =
-      match __ with
-      | AllInSyncAck -> "all"
-      | LocalAck -> "local"
-      | NoAck -> "none"
+  static member withRequiredAcks x c = Config.withConfig<string> "acks" x c
+  static member withBatchNumMessages = Config.withConfig<int> "batch.num.messages"
+  static member withCompression = Config.withConfig<string> "compression"
+  static member withRequestTimeoutMs = Config.withConfig<int> "request.timeout.ms"
+  static member withPartitioner = Config.withConfig<string> "partitioner"
+  static member withMessageSendMaxRetries = Config.withConfig<int> "message.send.max.retries"
 
 /// Operations on producers.
 [<CompilationRepresentationAttribute(CompilationRepresentationFlags.ModuleSuffix)>]
 module Producer =
   
-  let createConfig (config:seq<string * obj>) =
-    let producer = new Producer(dict config, false, false)
+  /// Creates a producer.
+  let create (config:Config) =
+    let producer = new Producer(Config.toConfig config, false, false)
     producer    
-
-  let create (ccfg:KafkaConfig) (pcfg:ProducerConfig) =
-    let config = Seq.append (ccfg.ToList()) (pcfg.ToList())
-    createConfig config
 
   /// Creates an IDeliveryHandler and a Task which completes when the handler receives the specified number of messages.
   /// @expectedMessageCount - the number of messages to be received to complete the Task.
@@ -245,60 +249,27 @@ module Producer =
   let produceString (p:Producer) (topic:string) (k:string, v:string) : Async<Message> =
     produce p topic (stringToSegment k, stringToSegment v)
 
+  /// Produces a batch of messages sequentially.
+  /// Short-circuits on message error.
   let produceBatched (p:Producer) (topic:string) (ms:(ArraySegment<byte> * ArraySegment<byte>)[]) : Async<Message[]> =
     produceBatchedInternal p topic true ms
 
+  /// Produces a batch of messages sequentially.
+  /// Short-circuits on message error.
   let produceBatchedBytes (p:Producer) (topic:string) (ms:(byte[] * byte[])[]) : Async<Message[]> =
     let ms = ms |> Array.map (fun (k,v) -> arrayToSegment k, arrayToSegment v)
     produceBatched p topic ms
 
+  /// Produces a batch of messages sequentially.
+  /// Short-circuits on message error.
   let produceBatchedString (p:Producer) (topic:string) (ms:(string * string)[]) : Async<Message[]> =
     let ms = ms |> Array.map (fun (k,v) -> stringToSegment k, stringToSegment v)
     produceBatched p topic ms
 
-
-/// Consumer configuration.
-type ConsumerConfig = {
-  topic : string
-  groupId : string
-  fetchMaxBytes : int
-  fetchMinBytes : int
-  fetchMaxWait : int
-  autoOffsetReset : AutoOffsetReset
-  heartbeatInternvalMs : int
-  sessionTimeoutMs : int
-  checkCrc : bool
-} with
-  /// Creates a collection of configuration values to be passed to Confluent.Kafka.
-  member __.ToList () : list<string * obj> =
-    [
-      "group.id", box __.groupId        
-      "default.topic.config", box <| (dict ["auto.offset.reset", box (__.autoOffsetReset.ToString())])
-      "enable.auto.commit", box false
-      "fetch.message.max.bytes", box __.fetchMaxBytes
-      "fetch.min.bytes", box __.fetchMinBytes
-      "fetch.wait.max.ms", box __.fetchMaxWait
-      "check.crcs", box __.checkCrc
-      "heartbeat.interval.ms", box __.heartbeatInternvalMs
-      "session.timeout.ms", box __.sessionTimeoutMs
-    ]
-
-/// Consumer offset reset.
-and AutoOffsetReset =
-  | Error
-  | Earliest
-  | Latest
-  with
-    override __.ToString () =
-      match __ with
-      | Error -> "error"
-      | Earliest -> "earliest"
-      | Latest -> "latest"
-
 /// A set of messages from a single partition.
 type ConsumerMessageSet = {
-  topic : TopicName
-  partition : Partition
+  topic : string
+  partition : int
   messages : Message[]
 } with
   static member lastOffset (ms:ConsumerMessageSet) =
@@ -466,17 +437,10 @@ module Consumer =
   /// Creates a consumer.
   /// - OnPartitionsAssigned -> Assign
   /// - OnPartitionsRevoked -> Unassign
-  let createConfig (config:seq<string * obj>) =
-    let consumer = new Consumer(dict config)
+  let create (config:Config) =
+    let consumer = new Consumer(Config.toConfig config)
     consumer.OnPartitionsAssigned |> Event.add (fun m -> consumer.Assign m)
     consumer.OnPartitionsRevoked |> Event.add (fun _ -> consumer.Unassign ())
-    consumer
-
-  /// Creates a consumer.
-  let create (ccfg:KafkaConfig) (cfg:ConsumerConfig) =
-    let config = Seq.append (ccfg.ToList()) (cfg.ToList())
-    let consumer = createConfig config
-    consumer.Subscribe cfg.topic
     consumer
 
   /// Consumes messages, buffers them by time and batchSize and calls the specified handler.
@@ -493,12 +457,12 @@ module Consumer =
     let! ct = Async.CancellationToken    
     use cts = CancellationTokenSource.CreateLinkedTokenSource ct
     let tcs = TaskCompletionSource<unit>()    
-    let queues = ConcurrentDictionary<TopicName * Partition, BlockingCollection<Message>>()    
+    let queues = ConcurrentDictionary<string * int, BlockingCollection<Message>>()    
     let close () =
       for kvp in queues do
         try kvp.Value.CompleteAdding() with _ -> ()
     tcs.Task.ContinueWith(fun (_:Task<unit>) -> cts.Cancel()) |> ignore
-    let consumePartition (t:TopicName, p:Partition) (queue:BlockingCollection<Message>) = async {      
+    let consumePartition (t:string, p:int) (queue:BlockingCollection<Message>) = async {      
       try
         use queue = queue
         do!
