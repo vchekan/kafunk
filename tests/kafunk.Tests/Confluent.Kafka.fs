@@ -280,8 +280,7 @@ type ConsumerMessageSet = {
     if ms.messages.Length = 0 then -1L
     else ms.messages.[0].Offset.Value
 
-
-
+/// State for the offset commit queue/
 type private OffsetCommitQueueState = {  
   assignment : Set<string * int>
   offsets : Dictionary<string * int, int64>
@@ -289,8 +288,8 @@ type private OffsetCommitQueueState = {
   
   static member Empty = { assignment = Set.empty ; offsets = Dictionary<_,_>() }
   
-  static member revoke (s:OffsetCommitQueueState) (tps:TopicPartition seq) =
-    { assignment = (s.assignment,tps) ||> Seq.fold (fun a tp -> Set.remove (tp.Topic,tp.Partition) a)
+  static member revoke (s:OffsetCommitQueueState) =
+    { assignment = Set.empty
       offsets = s.offsets }
       
   static member assign (s:OffsetCommitQueueState) (tps:TopicPartition seq) =
@@ -349,7 +348,6 @@ type OffsetCommitQueue internal (consumer:Consumer) =
     let commit (s:OffsetCommitQueueState) = async {
       let offsets = OffsetCommitQueueState.getOffsets s
       if offsets.Length > 0 then
-        //printfn "committing_offsets|%A" offsets
         let! res = consumer.CommitAsync offsets |> Async.AwaitTask
         if (res.Error.HasError) then
           failwithf "offset_commit_error|code=%O reason=%s" res.Error.Code res.Error.Reason
@@ -378,8 +376,8 @@ type OffsetCommitQueue internal (consumer:Consumer) =
           return s
         | Choice3Of5 committedOffsets ->
           return OffsetCommitQueueState.updateOffsets s committedOffsets
-        | Choice4Of5 revokedPartitions ->
-          return OffsetCommitQueueState.revoke s revokedPartitions 
+        | Choice4Of5 _revokedPartitions ->
+          return OffsetCommitQueueState.revoke s 
         | Choice5Of5 assignedPartitions ->
           return OffsetCommitQueueState.assign s assignedPartitions }) OffsetCommitQueueState.Empty
       |> Async.Ignore }
@@ -480,6 +478,7 @@ module Consumer =
           if c.Consume(&m, pollTimeoutMs) then
             Message.throwIfError m
             buf.Add m
+            // drain in-memory buffer
             while c.Consume(&m, 0) && (not cts.Token.IsCancellationRequested) do
               Message.throwIfError m  
               buf.Add m
