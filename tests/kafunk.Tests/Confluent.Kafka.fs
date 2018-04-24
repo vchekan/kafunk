@@ -64,7 +64,7 @@ module internal Prelude =
 
 /// Operations on messages.
 [<CompilationRepresentationAttribute(CompilationRepresentationFlags.ModuleSuffix)>]
-module Message =
+module internal Message =
   
   let internal errorMessage (m:Message) (e:Error) =
     sprintf "message_error|topic=%s partition=%i offset=%i code=%O reason=%s" m.Topic m.Partition m.Offset.Value e.Code e.Reason
@@ -176,11 +176,12 @@ type Config = {
     |> Config.withRequiredAcks "all"
     |> Config.withConfig "produce.offset.report" true
 
-  static member withBootstrapServers = Config.withConfig<string> "bootstrap.servers"
-  
+  static member withBootstrapServers = Config.withConfig<string> "bootstrap.servers"  
   static member withClientId = Config.withConfig<string> "client.id"  
   static member withMaxInFlight = Config.withConfig<int> "max.in.flight.requests.per.connection"
   
+  // consumers
+
   static member withEnableAutoCommit = Config.withConfig<bool> "enable.auto.commit"
   static member withAutoOffsetReset x = Config.withConfigMap "default.topic.config" [ "auto.offset.reset",box x ]
   static member withGroupId = Config.withConfig<string> "group.id"
@@ -191,10 +192,12 @@ type Config = {
   static member withHeartbeatInterval = Config.withConfig<int> "heartbeat.interval.ms"
   static member withSessionTimeout = Config.withConfig<int> "session.timeout.ms"
 
+  // producers
+  
   static member withLingerMs = Config.withConfig<int> "linger.ms"
   static member withRequiredAcks x c = Config.withConfig<string> "acks" x c
   static member withBatchNumMessages = Config.withConfig<int> "batch.num.messages"
-  static member withCompression = Config.withConfig<string> "compression"
+  static member withCompression = Config.withConfig<string> "compression.codec"
   static member withRequestTimeoutMs = Config.withConfig<int> "request.timeout.ms"
   static member withPartitioner = Config.withConfig<string> "partitioner"
   static member withMessageSendMaxRetries = Config.withConfig<int> "message.send.max.retries"
@@ -342,7 +345,7 @@ type OffsetCommitQueue internal (consumer:Consumer) =
   member __.OnOffsetsCommitted = committed.Publish
 
   /// Starts the offset commit queue process.
-  member __.StartInternal (commitIntervalMs:int) = async {
+  member private __.StartInternal (commitIntervalMs:int) = async {
        
     // commits accumulated offsets
     let commit (s:OffsetCommitQueueState) = async {
