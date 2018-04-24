@@ -33,5 +33,5 @@ group Test
   nuget NUnit
   nuget NUnit.Runners
   nuget NUnit3TestAdapter
-  nuget Confluent.Kafka
+  nuget Confluent.Kafka = 0.11.4
   nuget Microsoft.NET.Test.Sdk
