@@ -122,93 +122,104 @@ module internal Message =
 //      | NoAck -> "none"
 
 /// Kafka client configuration.
-type Config = {
-  config : Map<string, obj>
-} with
-  
-  /// Empty configuration.
-  static member Empty = { config = Map.empty }
-      
-  static member withConfig<'a> (n:string) (v:'a) (c:Config) : Config =
-    { c with config = Map.add n (box v) c.config }
+module Config =
+    let private enumToString e = (sprintf "%O" e).ToLower()
 
-  static member withConfigs (xs:(string * obj) seq) (c:Config) : Config =
-    { c with config = (c.config,xs) ||> Seq.fold (fun c (k,v) -> Map.add k v c) }
-
-  static member withConfigKvps (xs:KeyValuePair<string, obj> seq) (c:Config) : Config =
-    c |> Config.withConfigs (xs |> Seq.map (fun kvp -> kvp.Key,kvp.Value))
-
-  static member ofKvps (xs:KeyValuePair<string, obj> seq) =
-    Config.Empty |> Config.withConfigKvps xs
-
-  static member removeConfig (n:string) (c:Config) =
-    { c with config = Map.remove n c.config }
-
-  static member withConfigMap (n:string) (vs:(string * obj) seq) (c:Config) : Config =
-    { c with
-          config =
-            match c.config |> Map.tryFind n with
-            | Some x -> 
-              let x = x :?> IDictionary<string, obj> |> Seq.map (fun kvp -> kvp.Key,kvp.Value) |> Map.ofSeq
-              let x = (x,vs) ||> Seq.fold (fun x (k,v) -> Map.add k v x) |> Map.toSeq |> dict
-              c.config |> Map. add n (box x)
+    //
+    // Non-typed 
+    //
+    let remove = Map.remove
+    let config<'v> k (v: 'v) config = Map.add k (box v) config
+    let configMap<'v> name k (v: 'v) (config: Map<string,obj>): Map<string,obj> =
+        match config.TryFind name with
+            | Some mapObj -> 
+                match mapObj with
+                    | :? Map<string,obj> as map' ->
+                        Map.add name (box (Map.add k (box v) map')) config
+                    | _ -> failwithf "Expected config '%s' to be map but got %s" name (mapObj.GetType().Name)
             | None -> 
-              c.config |> Map.add n (box (dict vs)) }
+                Map.add name (box (Map([(k,v)]))) config
+    let configs configs map = List.fold (fun m (k, v) -> config k v m) map configs
 
-  /// Returns the configuration.
-  static member toConfig (c:Config) = 
-    c.config |> Map.toSeq |> dict
-  
-  /// Safe consumer configuration.
-  /// - enable.auto.commit = false
-  /// - auto.offset.reset = error
-  static member SafeConsumer = 
-    Config.Empty
-    |> Config.withEnableAutoCommit false
-    |> Config.withAutoOffsetReset "error"
 
-  /// Safe producer configuration.
-  /// - max.inflight = 1
-  /// - acks = all
-  static member SafeProducer = 
-    Config.Empty
-    |> Config.withMaxInFlight 1
-    |> Config.withRequiredAcks "all"
-    |> Config.withConfig "produce.offset.report" true
+    //
+    // Strong typed
+    //
+    let clientId = config<string> "client.id"
+    let bootstrapServers = config<string> "bootstrap.servers"
 
-  static member withBootstrapServers = Config.withConfig<string> "bootstrap.servers"  
-  static member withClientId = Config.withConfig<string> "client.id"  
-  static member withMaxInFlight = Config.withConfig<int> "max.in.flight.requests.per.connection"
-  
-  // consumers
+    module Consumer =
+        let enableAutoCommit = config<bool> "enable.auto.commit"
+        let groupId = config<string> "group.id"
+        let fetchMaxBytes = config<int> "fetch.message.max.bytes"
+        let fetchMinBytes = config<int> "fetch.min.bytes"
+        let fetchMaxWaitMs = config<int> "fetch.wait.max.ms"
+        let checkCrc = config<bool> "check.crcs"
+        let heartbeatInterval = config<int> "heartbeat.interval.ms"
+        let sessionTimeout = config<int> "session.timeout.ms"
+        
+        module Topic =
+            type AutoOffsetReset =
+                | Beginning
+                | End
+                | Error
+            
+            let autoOffsetReset (reset: AutoOffsetReset) = configMap<string> "default.topic.config" "auto.offset.reset" (enumToString reset)
 
-  static member withEnableAutoCommit = Config.withConfig<bool> "enable.auto.commit"
-  static member withAutoOffsetReset x = Config.withConfigMap "default.topic.config" [ "auto.offset.reset",box x ]
-  static member withGroupId = Config.withConfig<string> "group.id"
-  static member withFetchMaxBytes = Config.withConfig<int> "fetch.message.max.bytes"
-  static member withFetchMinBytes = Config.withConfig<int> "fetch.min.bytes"
-  static member withFetchMaxWaitMs = Config.withConfig<int> "fetch.wait.max.ms"
-  static member withCheckCrc = Config.withConfig<bool> "check.crcs"
-  static member withHeartbeatInterval = Config.withConfig<int> "heartbeat.interval.ms"
-  static member withSessionTimeout = Config.withConfig<int> "session.timeout.ms"
+        let safe = 
+            Map.empty
+            |> enableAutoCommit false
+            |> Topic.autoOffsetReset Topic.Error
 
-  // producers
-  
-  static member withLingerMs = Config.withConfig<int> "linger.ms"
-  static member withRequiredAcks x c = Config.withConfig<string> "acks" x c
-  static member withBatchNumMessages = Config.withConfig<int> "batch.num.messages"
-  static member withCompression = Config.withConfig<string> "compression.codec"
-  static member withRequestTimeoutMs = Config.withConfig<int> "request.timeout.ms"
-  static member withPartitioner = Config.withConfig<string> "partitioner"
-  static member withMessageSendMaxRetries = Config.withConfig<int> "message.send.max.retries"
+    module Producer =
+        type Compression =
+              None 
+            | Gzip 
+            | Snappy
+            | Lz4
+
+        type RequiredAcks =
+              All
+            | None
+            | Some of count: int
+
+        type Partitioner =
+              Random
+            | Consistent
+            | Consistent_Random
+            | Murmur2
+            | Murmur2_Random
+
+        let maxInFlight = config "max.in.flight.requests.per.connection" 
+        let lingerMs = config<int> "linger.ms"
+        let requiredAcks (acks: RequiredAcks) = 
+            match acks with
+                | All -> -1
+                | None -> 0
+                | Some count -> count
+            |> config "request.required.acks"
+        let batchNumMessages = config<int> "batch.num.messages"
+        let compression (compression: Compression) = config<string> "compression.codec" (enumToString compression)
+        let requestTimeoutMs = config<int> "request.timeout.ms"
+        let partitioner (algorithm: Partitioner) = config<string> "partitioner" (enumToString algorithm)
+        let messageSendMaxRetries = config<int> "message.send.max.retries"
+
+        /// Safe producer configuration.
+        /// - max.inflight = 1
+        /// - acks = all
+        let safe =
+            Map.empty
+            |> maxInFlight 1
+            |> requiredAcks All
+            |> config "produce.offset.report" true
 
 /// Operations on producers.
 [<CompilationRepresentationAttribute(CompilationRepresentationFlags.ModuleSuffix)>]
 module Producer =
   
   /// Creates a producer.
-  let create (config:Config) =
-    let producer = new Producer(Config.toConfig config, false, false)
+  let create (config: Map<string,obj>) =
+    let producer = new Producer(config, false, false)
     producer    
 
   /// Creates an IDeliveryHandler and a Task which completes when the handler receives the specified number of messages.
@@ -438,8 +449,8 @@ module Consumer =
   /// Creates a consumer.
   /// - OnPartitionsAssigned -> Assign
   /// - OnPartitionsRevoked -> Unassign
-  let create (config:Config) =
-    let consumer = new Consumer(Config.toConfig config)
+  let create (config: Map<string,obj>) =
+    let consumer = new Consumer(config)
     consumer.OnPartitionsAssigned |> Event.add (fun m -> consumer.Assign m)
     consumer.OnPartitionsRevoked |> Event.add (fun _ -> consumer.Unassign ())
     consumer
